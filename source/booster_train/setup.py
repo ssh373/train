@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Installation script for the 'booster_rl_tasks' python package."""
+"""Installation script for the 'booster_train' python package."""
 
 import os
 import toml
@@ -23,8 +23,8 @@ INSTALL_REQUIRES = [
 
 # Installation operation
 setup(
-    name="booster_rl_tasks",
-    packages=["booster_rl_tasks"],
+    name="booster_train",
+    packages=["booster_train"],
     author=EXTENSION_TOML_DATA["package"]["author"],
     maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
     url=EXTENSION_TOML_DATA["package"]["repository"],

@@ -21,7 +21,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-import booster_rl_tasks.tasks.manager_based.beyond_mimic.mdp as mdp
+import booster_train.tasks.manager_based.beyond_mimic.mdp as mdp
 
 ##
 # Scene definition

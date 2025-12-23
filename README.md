@@ -13,7 +13,7 @@ This repository follows the standard Isaac Lab project structure, and is tested 
 
 - Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
     ```bash
-    git clone https://github.com/BoosterRobotics/booster_rl_tasks.git
+    git clone https://github.com/BoosterRobotics/booster_train.git
     ```
 
 - Download and install booster_assets:
@@ -24,7 +24,7 @@ This repository follows the standard Isaac Lab project structure, and is tested 
 
     ```bash
     # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/booster_rl_tasks
+    python -m pip install -e source/booster_train
     ```
 
 - Prepare BeyondMimic motion data:

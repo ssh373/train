@@ -21,7 +21,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-import booster_rl_tasks.tasks.manager_based.beyond_mimic.mdp as mdp
+import booster_train.tasks.manager_based.beyond_mimic.mdp as mdp
 
 ##
 # Scene definition
@@ -230,7 +230,7 @@ class RewardsCfg:
         weight=1.0,
         params={"command_name": "motion", "std": 3.14},
     )
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-1e-1)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-1.0)
     joint_limit = RewTerm(
         func=mdp.joint_pos_limits,
         weight=-10.0,
@@ -238,16 +238,58 @@ class RewardsCfg:
     )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-0.1,
+        weight=-10.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=[
-                    r"^(?!left_hand_link$)(?!right_hand_link$)(?!left_foot_link$)(?!right_foot_link$).+$"
+                    r"^(?!left_foot_link$)(?!right_foot_link$).+$"
                 ],
             ),
             "threshold": 1.0,
         },
+    )
+
+    motion_foot_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=15.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["left_foot_link", "right_foot_link"]},
+    )
+
+    # motion_foot_pitch_penalty = RewTerm(
+    #     func=mdp.motion_relative_body_pitch_error_l2,
+    #     weight=-1.0, 
+    #     params={"command_name": "motion", "body_names": ["left_foot_link", "right_foot_link"]},
+    # ) 
+
+    motion_hand_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=3.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["left_hand_link", "right_hand_link"]},
+    )
+
+    motion_foot_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=15.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["left_foot_link", "right_foot_link"]},
+    )
+
+    motion_hand_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=8.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["left_hand_link", "right_hand_link"]},
+    )
+
+    motion_trunk_ori = RewTerm(
+        func=mdp.motion_relative_body_orientation_error_exp,
+        weight=10.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["Trunk"]},
+    )  
+
+    motion_trunk_pos = RewTerm(
+        func=mdp.motion_relative_body_position_error_exp,
+        weight=20.0,
+        params={"command_name": "motion", "std": 0.2, "body_names": ["Trunk"]},
     )
 
 
@@ -318,6 +360,6 @@ class TrackingEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
         # viewer settings
-        self.viewer.eye = (1.5, 1.5, 1.5)
-        self.viewer.origin_type = "asset_root"
-        self.viewer.asset_name = "robot"
+        self.viewer.origin_type = "world"   # for rotation the view by mouse and keyboard
+        self.viewer.eye = (3.0, -4.0, 2.0)
+        self.viewer.lookat = (0.0, 0.0, 1.0)

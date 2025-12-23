@@ -28,18 +28,40 @@ if TYPE_CHECKING:
 
 
 class MotionLoader:
-    def __init__(self, motion_file: str, body_indexes: Sequence[int],
+    def __init__(self, motion_file: str,
+                 track_body_names: Sequence[str],
+                 track_joint_names: Sequence[str],
+                 *,
+                 default_motion_body_names: Sequence[str] | None = None,
+                 default_motion_joint_names: Sequence[str] | None = None,
                  tail_len: int = 0, device: str = "cpu"):
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
         data = np.load(motion_file)
         self.fps = data["fps"]
-        self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
-        self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
+        if "body_names" in data:
+            self._body_names = data["body_names"].tolist()
+        else:
+            assert default_motion_body_names is not None, "Motion file missing body_names, and no default_body_names provided."
+            self._body_names = default_motion_body_names
+        if "joint_names" in data:
+            self._joint_names = data["joint_names"].tolist()
+        else:
+            assert default_motion_joint_names is not None, "Motion file missing joint_names, and no default_joint_names provided."
+            self._joint_names = default_motion_joint_names
+        self._body_indexes = torch.tensor(
+            [self._body_names.index(name) for name in track_body_names], dtype=torch.long, device=device
+        )
+        self._joint_indexes = torch.tensor(
+            [self._joint_names.index(name) for name in track_joint_names], dtype=torch.long, device=device
+        )
+        self.joint_pos = torch.tensor(
+            data["joint_pos"], dtype=torch.float32, device=device)[:, self._joint_indexes]
+        self.joint_vel = torch.tensor(
+            data["joint_vel"], dtype=torch.float32, device=device)[:, self._joint_indexes]
         self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
         self._body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
         self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
         self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
-        self._body_indexes = body_indexes
         self.time_step_total = self.joint_pos.shape[0]
         self.tail_len = tail_len
 
@@ -78,8 +100,15 @@ class MotionCommand(CommandTerm):
             self.robot.find_bodies(self.cfg.body_names, preserve_order=True)[0], dtype=torch.long, device=self.device
         )
 
+        default_motion_body_names = self.cfg.default_motion_body_names or self.robot.body_names
+        default_motion_joint_names = self.cfg.default_motion_joint_names or self.robot.joint_names
+
         self.motion = MotionLoader(
-            self.cfg.motion_file, self.body_indexes, tail_len=self.cfg.tail_len, device=self.device)
+            self.cfg.motion_file, self.cfg.body_names, self.robot.joint_names,
+            default_motion_body_names=default_motion_body_names,
+            default_motion_joint_names=default_motion_joint_names,
+            tail_len=self.cfg.tail_len, device=self.device
+        )
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
@@ -378,6 +407,8 @@ class MotionCommandCfg(CommandTermCfg):
     motion_file: str = MISSING
     anchor_body_name: str = MISSING
     body_names: list[str] = MISSING
+    default_motion_body_names: list[str] | None = None
+    default_motion_joint_names: list[str] | None = None
     tail_len: int = 0
 
     pose_range: dict[str, tuple[float, float]] = {}

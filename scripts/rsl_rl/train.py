@@ -97,7 +97,7 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import booster_rl_tasks.tasks  # noqa: F401
+import booster_train.tasks  # noqa: F401
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True

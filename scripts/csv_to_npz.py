@@ -57,7 +57,7 @@ from isaaclab.utils.math import axis_angle_from_quat, quat_conjugate, quat_mul, 
 # Pre-defined configs
 ##
 # Booster assets currently only provide retargeted motion data for Booster K1 robot
-from booster_rl_tasks.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG
+from booster_train.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG
 from booster_assets.motions import K1_JOINT_NAMES as JOINT_NAMES
 
 
@@ -242,6 +242,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         "body_quat_w": [],
         "body_lin_vel_w": [],
         "body_ang_vel_w": [],
+        "joint_names": np.array(robot.joint_names),
+        "body_names": np.array(robot.body_names),
     }
     file_saved = False
     # --------------------------------------------------------------------------
@@ -304,6 +306,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             np.savez(f"{args_cli.output_name}", **log)
             print(f"[INFO]: Motion saved to {args_cli.output_name}")
             sys.exit(0)
+
 
 def main():
     """Main function."""

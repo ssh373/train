@@ -2,7 +2,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils.math import *
-from booster_rl_tasks.assets.robots.actuator import DelayedImplicitActuatorCfg
+from booster_train.assets.robots.actuator import DelayedImplicitActuatorCfg
 from booster_assets import BOOSTER_ASSETS_DIR
 
 ARMATURE_6416 = 0.095625

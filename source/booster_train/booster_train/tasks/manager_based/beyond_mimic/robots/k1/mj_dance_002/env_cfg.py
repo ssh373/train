@@ -2,8 +2,8 @@ from isaaclab.utils import configclass
 from isaaclab.terrains import TerrainGeneratorCfg
 import isaaclab.terrains as terrain_gen
 from booster_assets import BOOSTER_ASSETS_DIR
-from booster_rl_tasks.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG, K1_ACTION_SCALE
-from booster_rl_tasks.tasks.manager_based.beyond_mimic.agents.rsl_rl_ppo_cfg import LOW_FREQ_SCALE
+from booster_train.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG, K1_ACTION_SCALE
+from booster_train.tasks.manager_based.beyond_mimic.agents.rsl_rl_ppo_cfg import LOW_FREQ_SCALE
 from .tracking_env_cfg import TrackingEnvCfg
 
 
