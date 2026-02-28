@@ -126,8 +126,8 @@ class ObservationsCfg:
 class RewardsCfg:
     track_lin_vel_xy = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
-        weight=1.0,
-        params={"command_name": "base_velocity", "std": 0.1},
+        weight=3.0,
+        params={"command_name": "base_velocity", "std": 0.25},
     )
     track_ang_vel_z = RewTerm(
         func=mdp.track_ang_vel_z_exp,
@@ -150,12 +150,12 @@ class RewardsCfg:
     # ── 좌우 비대칭 방지: Hip_Roll, Ankle_Roll 기본값 유지 ──
     joint_deviation_hip_roll = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.2,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Hip_Roll"])},
     )
     joint_deviation_ankle_roll = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-0.1,
+        weight=-0.05,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Ankle_Roll"])},
     )
 
@@ -283,11 +283,69 @@ class EventsCfg:
         params={"asset_cfg": SceneEntityCfg("robot"), "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
     )
 
+
+
+# ── 커리큘럼 헬퍼: 속도 범위를 선형 보간 ──
+def _lerp_velocity_range(env, env_ids, data, initial_range, final_range, num_steps_start, num_steps_end):
+    """학습 진행도에 따라 velocity command 범위를 initial → final로 선형 확장."""
+    if env.common_step_counter < num_steps_start:
+        return initial_range
+    if env.common_step_counter >= num_steps_end:
+        return final_range
+    progress = (env.common_step_counter - num_steps_start) / (num_steps_end - num_steps_start)
+    new_min = initial_range[0] + progress * (final_range[0] - initial_range[0])
+    new_max = initial_range[1] + progress * (final_range[1] - initial_range[1])
+    return (new_min, new_max)
+
+
 @configclass
 class CurriculumCfg:
-    """Curriculum terms for the MDP."""
+    """속도 명령 범위를 점진적으로 확장하는 커리큘럼.
 
-    pass
+    - 0~3000 iteration (0~72000 steps): 쉬운 범위 → 최종 범위
+    - 3000 iteration 이후: 최종 범위 유지
+    """
+
+    vel_x_curriculum = CurrTerm(
+        func=mdp.modify_term_cfg,
+        params={
+            "address": "commands.base_velocity.ranges.lin_vel_x",
+            "modify_fn": _lerp_velocity_range,
+            "modify_params": {
+                "initial_range": (-0.3, 0.5),
+                "final_range": (-1.0, 1.5),
+                "num_steps_start": 0,
+                "num_steps_end": 72000,   # ≈ 3000 iterations
+            },
+        },
+    )
+    vel_y_curriculum = CurrTerm(
+        func=mdp.modify_term_cfg,
+        params={
+            "address": "commands.base_velocity.ranges.lin_vel_y",
+            "modify_fn": _lerp_velocity_range,
+            "modify_params": {
+                "initial_range": (-0.3, 0.3),
+                "final_range": (-1.0, 1.0),
+                "num_steps_start": 0,
+                "num_steps_end": 72000,
+            },
+        },
+    )
+    vel_yaw_curriculum = CurrTerm(
+        func=mdp.modify_term_cfg,
+        params={
+            "address": "commands.base_velocity.ranges.ang_vel_z",
+            "modify_fn": _lerp_velocity_range,
+            "modify_params": {
+                "initial_range": (-0.5, 0.5),
+                "final_range": (-1.2, 1.2),
+                "num_steps_start": 0,
+                "num_steps_end": 72000,
+            },
+        },
+    )
+
 
 
 @configclass
