@@ -264,6 +264,37 @@ class RewardsCfg:
         },
     )
 
+    # (6) 한 발이 너무 오래 접촉(끌림) 방지: 양발 모두 들기를 강제
+    #     max_contact_time=0.5초 이상 연속 접촉 시 패널티 누적
+    prolonged_contact = RewTerm(
+        func=mdp.prolonged_contact_penalty,
+        weight=-1.5,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_foot_link", "right_foot_link"],
+            ),
+            "max_contact_time": 0.5,
+            "vel_threshold": 0.1,
+        },
+    )
+
+    # (7) 양발 접촉 시간 대칭: 좌우 발의 contact_time 차이를 패널티
+    #     y 명령이 없을 때 대칭 보행을 더 강하게 유도
+    gait_symmetry = RewTerm(
+        func=mdp.gait_contact_symmetry_penalty,
+        weight=-1.0,
+        params={
+            "command_name": "base_velocity",
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_foot_link", "right_foot_link"],
+            ),
+            "vel_threshold": 0.1,
+        },
+    )
+
 
 @configclass
 class TerminationsCfg:

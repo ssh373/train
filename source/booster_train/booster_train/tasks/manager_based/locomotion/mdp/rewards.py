@@ -440,3 +440,51 @@ def stride_length_reward(
     cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
     reward *= (cmd_speed > vel_threshold).float()
     return reward
+
+
+def prolonged_contact_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    max_contact_time: float = 0.5,
+    vel_threshold: float = 0.1,
+) -> torch.Tensor:
+    """이동 중 한 발이 너무 오래 연속 접촉하면 패널티 (양발 모두 들기 유도).
+
+    각 발의 current_contact_time이 max_contact_time을 초과한 만큼 패널티를 줍니다.
+    한 쪽 발만 끌며 걷는 비대칭 보행을 직접적으로 방지합니다.
+    정지 시(cmd < vel_threshold)에는 적용하지 않습니다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    # 각 발이 max_contact_time 이상 접촉하고 있으면 초과분 패널티
+    over_time = torch.clamp(contact_time - max_contact_time, min=0.0)
+    penalty = torch.sum(over_time, dim=1)
+    # 이동 중일 때만 적용
+    cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    return penalty * (cmd_speed > vel_threshold).float()
+
+
+def gait_contact_symmetry_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    vel_threshold: float = 0.1,
+) -> torch.Tensor:
+    """양발의 접촉 시간 차이를 패널티하여 대칭 보행 유도.
+
+    이동 중 좌우 발의 current_contact_time 차이가 크면 패널티.
+    한쪽 발만 계속 접촉(끌림)하고 다른 쪽만 들어 올리는 비대칭 패턴을 방지합니다.
+    y 방향 명령이 없을 때 특히 중요하며, 전후진 시 대칭 걸음을 유도합니다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    # 양발 contact time 차이
+    diff = torch.abs(contact_time[:, 0] - contact_time[:, 1])
+    # y 명령이 작을수록 대칭 강제를 강화 (y 명령이 크면 약간의 비대칭 허용)
+    cmd = env.command_manager.get_command(command_name)
+    cmd_speed = torch.norm(cmd[:, :2], dim=1)
+    cmd_y_abs = torch.abs(cmd[:, 1])
+    # y 명령이 0에 가까울수록 weight 1.0, y 명령이 클수록 weight 감소
+    y_symmetry_weight = torch.clamp(1.0 - cmd_y_abs / 0.5, min=0.3)
+    return diff * y_symmetry_weight * (cmd_speed > vel_threshold).float()
