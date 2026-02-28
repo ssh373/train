@@ -392,3 +392,51 @@ def feet_slide(
     body_vel = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
     reward = torch.sum(body_vel.norm(dim=-1) * contacts, dim=1)
     return reward
+
+
+def double_support_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    vel_threshold: float = 0.1,
+) -> torch.Tensor:
+    """이동 중 양발이 동시에 지면에 닿아 있는(double-support) 시간을 페널티.
+
+    빠르게 걸을수록 single-stance 비율이 높아야 자연스러운 보행입니다.
+    양발이 모두 닿아 있으면 1.0, 아니면 0.0을 반환합니다.
+    command 속도가 vel_threshold 이하이면 페널티 0 (정지 시 양발 지지는 허용).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    both_in_contact = (contact_time > 0.0).all(dim=1).float()
+    # 정지 시에는 double-support 허용
+    cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    both_in_contact *= (cmd_speed > vel_threshold).float()
+    return both_in_contact
+
+
+def stride_length_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_threshold: float = 0.1,
+) -> torch.Tensor:
+    """속도에 비례하여 보폭(air-time × 이동속도)을 보상.
+
+    빠르게 이동할수록 긴 스윙 시간이 필요하도록 유도합니다.
+    보상 = mean(current_air_time) × ||base_lin_vel_xy||
+    정지 시(vel < threshold)에는 0.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
+    # 현재 air_time의 평균 (양발 중 공중에 있는 발의 시간)
+    mean_air = torch.mean(air_time, dim=1)
+    # 로봇 이동 속도
+    asset: RigidObject = env.scene[asset_cfg.name]
+    base_speed = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
+    reward = mean_air * base_speed
+    # 정지 시 보상 0
+    cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    reward *= (cmd_speed > vel_threshold).float()
+    return reward
