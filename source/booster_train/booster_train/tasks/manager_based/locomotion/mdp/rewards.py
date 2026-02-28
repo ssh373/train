@@ -488,3 +488,62 @@ def gait_contact_symmetry_penalty(
     # y 명령이 0에 가까울수록 weight 1.0, y 명령이 클수록 weight 감소
     y_symmetry_weight = torch.clamp(1.0 - cmd_y_abs / 0.5, min=0.3)
     return diff * y_symmetry_weight * (cmd_speed > vel_threshold).float()
+
+
+def lateral_adaptive_joint_deviation(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_lateral_vel: float = 0.5,
+    min_weight_ratio: float = 0.1,
+) -> torch.Tensor:
+    """측면 이동 명령에 비례하여 관절 deviation 패널티를 줄여주는 적응형 패널티.
+
+    측면(y) 속도 명령이 클수록 Hip_Roll 등의 관절이 기본값에서 벗어나야 하므로
+    패널티를 줄여줍니다. 이를 통해 옆걸음 시 충분한 보폭을 확보할 수 있습니다.
+
+    Args:
+        max_lateral_vel: 이 속도 이상에서 패널티가 최소(min_weight_ratio)가 됨.
+        min_weight_ratio: 최대 감소 시의 잔여 패널티 비율 (0.1 = 최대 90% 감소).
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    base_penalty = torch.sum(torch.abs(angle), dim=1)
+    # lateral command에 따른 스케일링
+    cmd = env.command_manager.get_command(command_name)
+    lateral_cmd = torch.abs(cmd[:, 1])
+    # lateral_cmd가 0이면 weight=1.0, max_lateral_vel 이상이면 weight=min_weight_ratio
+    weight = torch.clamp(1.0 - (1.0 - min_weight_ratio) * lateral_cmd / max_lateral_vel, min=min_weight_ratio)
+    return base_penalty * weight
+
+
+def foot_swing_horizontal_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    vel_threshold: float = 0.1,
+) -> torch.Tensor:
+    """스윙(공중) 중인 발의 수평 속도를 보상 → 자연스러운 수평 스윙 유도.
+
+    발이 공중에 있을 때 수평 방향으로 이동하는 것을 보상합니다.
+    이를 통해 무릎만 들었다 내리는 '근위병 걸음'을 방지하고,
+    자연스러운 전방/측방 스윙을 유도합니다.
+    수평 속도에 tanh를 적용하여 과도한 속도를 억제합니다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]  # (N, 2)
+    in_air = air_time > 0.0  # (N, 2)
+
+    asset: RigidObject = env.scene[asset_cfg.name]
+    foot_vel_xy = asset.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]  # (N, 2, 2)
+    foot_speed_xy = torch.norm(foot_vel_xy, dim=-1)  # (N, 2)
+
+    # 공중에 있는 발의 수평 속도만 보상 (tanh로 상한 제한)
+    swing_speed = torch.tanh(foot_speed_xy / 1.0) * in_air.float()  # (N, 2)
+    reward = torch.sum(swing_speed, dim=1)
+
+    # 정지 시 보상 0
+    cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    reward *= (cmd_speed > vel_threshold).float()
+    return reward
