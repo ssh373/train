@@ -547,3 +547,102 @@ def foot_swing_horizontal_reward(
     cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
     reward *= (cmd_speed > vel_threshold).float()
     return reward
+
+
+# ──────────────────────────────────────────────────────
+# 추가 보상 함수들
+# ──────────────────────────────────────────────────────
+
+def ankle_pitch_stance_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_range: tuple[float, float] = (-0.3, 0.1),
+) -> torch.Tensor:
+    """접지 중 Ankle Pitch 활용 보상: 사람처럼 발목으로 안정적 접지.
+
+    지면에 닿은 발의 Ankle Pitch가 target_range 내에 있으면 보상,
+    범위를 벗어나면 deviation에 비례하여 보상 감소.
+    발뒤꿈치→발앞꿈치 전환(heel-to-toe)을 유도합니다.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    in_contact = contact_time > 0.0  # (N, num_feet)
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    ankle_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]  # (N, num_ankle_joints)
+    ankle_default = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    ankle_rel = ankle_pos - ankle_default  # (N, num_ankle_joints)
+
+    # target_range 내에 있으면 0, 벗어나면 deviation
+    low, high = target_range
+    deviation = torch.clamp(low - ankle_rel, min=0.0) + torch.clamp(ankle_rel - high, min=0.0)
+
+    # 접지 중인 발만 적용
+    in_contact_float = in_contact.float()  # (N, num_feet)
+    # ankle_rel 활용도: 범위 내 움직임을 보상 (절대값이 클수록 적극적 사용)
+    usage = torch.abs(ankle_rel) * in_contact_float
+    penalty = deviation * in_contact_float
+
+    reward = torch.sum(usage, dim=1) - torch.sum(penalty, dim=1)
+    return torch.clamp(reward, min=0.0)
+
+
+def joint_position_symmetry_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_threshold: float = 0.05,
+) -> torch.Tensor:
+    """좌우 다리 관절 위치 대칭 페널티: L/R 무릎 등의 비대칭 방지.
+
+    같은 gait phase에서 양쪽 다리의 동일 관절이 극단적으로 다른 위치에 있으면 패널티.
+    joint_ids는 [Left_joint0, Right_joint0, Left_joint1, Right_joint1, ...] 순으로 짝지어야 함.
+    예: joint_names=["Left_Knee_Pitch", "Right_Knee_Pitch"]
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    pos = asset.data.joint_pos[:, asset_cfg.joint_ids]       # (N, 2K)
+    default = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    rel = pos - default  # (N, 2K)
+
+    # 짝수 인덱스 = left, 홀수 인덱스 = right
+    left = rel[:, 0::2]   # (N, K)
+    right = rel[:, 1::2]  # (N, K)
+
+    # 대칭성: 전진 시 left+right ≈ 0이 아니라, |left| ≈ |right| 확인
+    # 한쪽만 과신전되면 ||left| - |right|| 이 커짐
+    diff = torch.abs(torch.abs(left) - torch.abs(right))
+    penalty = torch.sum(diff, dim=1)
+
+    cmd_speed = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+    return penalty * (cmd_speed > vel_threshold).float()
+
+
+def hip_roll_lateral_stride_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vel_threshold: float = 0.05,
+) -> torch.Tensor:
+    """vy 명령 시 Hip Roll을 적극 활용하여 보폭 확보하도록 보상.
+
+    lateral command 방향과 Hip Roll의 움직임이 일치하면 보상.
+    왼쪽 이동(vy>0) 시 왼쪽 다리 roll이 벌어지고,
+    오른쪽 이동(vy<0) 시 오른쪽 다리 roll이 벌어짐.
+    asset_cfg의 joint_names는 ["Left_Hip_Roll", "Right_Hip_Roll"] 순서여야 함.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    roll_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]       # (N, 2)
+    roll_default = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    roll_rel = roll_pos - roll_default  # (N, 2): [left_roll, right_roll]
+
+    cmd = env.command_manager.get_command(command_name)
+    vy_cmd = cmd[:, 1]  # lateral velocity command
+
+    # 양 Hip Roll 간 차이 (벌어짐): |left - right|
+    roll_spread = torch.abs(roll_rel[:, 0] - roll_rel[:, 1])
+
+    # vy가 클수록 더 많은 roll spread를 보상
+    reward = roll_spread * torch.abs(vy_cmd)
+    # vy가 작으면 보상 0
+    return reward * (torch.abs(vy_cmd) > vel_threshold).float()

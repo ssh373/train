@@ -77,7 +77,7 @@ class CommandsCfg:
         asset_name="robot",
         resampling_time_range=(2.0, 4.0),
         heading_command=True,
-        rel_standing_envs=0.05,
+        rel_standing_envs=0.02,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.5),
             lin_vel_y=(-1.0, 1.0),
@@ -140,22 +140,33 @@ class RewardsCfg:
     lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.0)
     ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
 
-    # ── Hip_Yaw가 기본값(0)에서 벗어나지 않도록 페널티 ──
+    # ── Hip_Yaw 완전 잠금: 기본값(0)에서 벗어나면 극단적 페널티 ──
     joint_deviation_hip_yaw = RewTerm(
         func=mdp.joint_deviation_l1,
-        weight=-2.0,
+        weight=-10.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Hip_Yaw"])},
     )
 
-    # ── Hip_Roll (측면 명령 시 완화), Ankle_Roll 기본값 유지 ──
+    # ── Hip_Roll: vy 명령 시 대폭 완화하여 옆걸음 보폭 확보 ──
     joint_deviation_hip_roll = RewTerm(
         func=mdp.lateral_adaptive_joint_deviation,
-        weight=-0.1,
+        weight=-0.05,
         params={
             "command_name": "base_velocity",
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Hip_Roll"]),
-            "max_lateral_vel": 0.5,     # 이 속도 이상이면 패널티 최소
-            "min_weight_ratio": 0.1,    # 최대 90% 감소 (옆걸음 시 Roll 자유도 확보)
+            "max_lateral_vel": 0.3,     # 이 속도 이상이면 패널티 거의 0
+            "min_weight_ratio": 0.05,   # 최대 95% 감소 (옆걸음 시 Roll 최대 자유도)
+        },
+    )
+
+    # ── Hip_Roll 적극 활용 보상: vy 명령 시 roll을 벌려 보폭 크게 ──
+    hip_roll_lateral_stride = RewTerm(
+        func=mdp.hip_roll_lateral_stride_reward,
+        weight=1.5,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["Left_Hip_Roll", "Right_Hip_Roll"]),
+            "vel_threshold": 0.03,
         },
     )
     joint_deviation_ankle_roll = RewTerm(
@@ -188,18 +199,18 @@ class RewardsCfg:
     )
 
 
-    # 이족 보행 air-time: 한 발씩 번갈아 들도록 유도
+    # 이족 보행 air-time: 한 발씩 번갈아 들도록 유도 (저속에서도 활성화)
     feet_air_time_biped = RewTerm(
         func=mdp.feet_air_time_positive_biped,
-        weight=2.0,
+        weight=2.5,
         params={
             "command_name": "base_velocity",
-            "threshold": 0.55,
+            "threshold": 0.6,
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
             ),
-            "vel_threshold": 0.05,
+            "vel_threshold": 0.03,
         },
     )
 
@@ -234,10 +245,10 @@ class RewardsCfg:
         },
     )
 
-    # (3.5) 수평 스윙 보상: 공중에서 발이 수평으로 이동하도록 유도
+    # (3.5) 수평 스윙 보상: 공중에서 발이 수평으로 이동하도록 유도 (보폭 증가)
     foot_swing_horizontal = RewTerm(
         func=mdp.foot_swing_horizontal_reward,
-        weight=0.5,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg(
@@ -248,11 +259,11 @@ class RewardsCfg:
                 "robot",
                 body_names=["left_foot_link", "right_foot_link"],
             ),
-            "vel_threshold": 0.1,
+            "vel_threshold": 0.03,
         },
     )
 
-    # 양발 동시 접촉(double-support) 페널티: 이동 중 한 발은 들어야 함
+    # 양발 동시 접촉(double-support) 페널티: 이동 중 한 발은 들어야 함 (저속에서도 적용)
     double_support = RewTerm(
         func=mdp.double_support_penalty,
         weight=-0.5,
@@ -262,14 +273,14 @@ class RewardsCfg:
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
             ),
-            "vel_threshold": 0.1,
+            "vel_threshold": 0.03,
         },
     )
 
-    # 속도 비례 보폭 보상: 빠를수록 긴 스윙을 유도
+    # 속도 비례 보폭 보상: 빠를수록 긴 스윙을 유도 (보폭 크게 강화)
     stride_length = RewTerm(
         func=mdp.stride_length_reward,
-        weight=1.0,
+        weight=2.0,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg(
@@ -277,12 +288,12 @@ class RewardsCfg:
                 body_names=["left_foot_link", "right_foot_link"],
             ),
             "asset_cfg": SceneEntityCfg("robot"),
-            "vel_threshold": 0.1,
+            "vel_threshold": 0.03,
         },
     )
 
     # 한 발이 너무 오래 접촉(끌림) 방지: 양발 모두 들기를 강제
-    # max_contact_time=0.5초 이상 연속 접촉 시 패널티 누적
+    # max_contact_time=0.4초 이상 연속 접촉 시 패널티 누적 (저속에서도 적용)
     prolonged_contact = RewTerm(
         func=mdp.prolonged_contact_penalty,
         weight=-1.5,
@@ -292,8 +303,8 @@ class RewardsCfg:
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
             ),
-            "max_contact_time": 0.5,
-            "vel_threshold": 0.1,
+            "max_contact_time": 0.4,
+            "vel_threshold": 0.03,
         },
     )
 
@@ -301,14 +312,59 @@ class RewardsCfg:
     # y 명령이 없을 때 대칭 보행을 더 강하게 유도
     gait_symmetry = RewTerm(
         func=mdp.gait_contact_symmetry_penalty,
-        weight=-1.0,
+        weight=-1.5,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
             ),
-            "vel_threshold": 0.1,
+            "vel_threshold": 0.03,
+        },
+    )
+
+    # ── 좌우 무릎 관절 대칭 패널티: 한쪽만 과신전 방지 ──
+    knee_symmetry = RewTerm(
+        func=mdp.joint_position_symmetry_penalty,
+        weight=-2.0,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=["Left_Knee_Pitch", "Right_Knee_Pitch"],
+            ),
+            "vel_threshold": 0.03,
+        },
+    )
+
+    # ── 좌우 Hip Pitch 대칭 패널티 ──
+    hip_pitch_symmetry = RewTerm(
+        func=mdp.joint_position_symmetry_penalty,
+        weight=-1.0,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=["Left_Hip_Pitch", "Right_Hip_Pitch"],
+            ),
+            "vel_threshold": 0.03,
+        },
+    )
+
+    # ── Ankle Pitch 접지 활용 보상: 사람처럼 발목으로 안정적 접지 ──
+    ankle_pitch_stance = RewTerm(
+        func=mdp.ankle_pitch_stance_reward,
+        weight=1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_foot_link", "right_foot_link"],
+            ),
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                joint_names=["Left_Ankle_Pitch", "Right_Ankle_Pitch"],
+            ),
+            "target_range": (-0.3, 0.1),
         },
     )
 
@@ -466,6 +522,9 @@ class FlatEnvCfg(BaseWalkEnvCfg):
                     ".*_Hip_Pitch": -0.2,
                     ".*_Knee_Pitch": 0.4,
                     ".*_Ankle_Pitch": -0.2,
+                    # Hip Roll 초기값: 다리가 약간 벌어진 상태로 시작 → 오므림 최소화
+                    "Left_Hip_Roll": 0.05,    # 왼쪽 다리 약간 바깥으로
+                    "Right_Hip_Roll": -0.05,  # 오른쪽 다리 약간 바깥으로
                 },
                 joint_vel={".*": 0.0},
             ),
@@ -478,11 +537,16 @@ class FlatEnvCfg(BaseWalkEnvCfg):
             },
         )
         
-        # self.actions.joint_pos.scale = K1_ACTION_SCALE
-        self.actions.joint_pos.scale = {
+        # action scale: Hip/Knee/Ankle만 사용, Hip_Yaw는 극소화
+        base_scale = {
             k: v for k, v in K1_ACTION_SCALE.items() 
             if any(s in k for s in ["Hip", "Knee", "Ankle"])
         }
+        # Hip_Yaw action scale을 극도로 줄여서 학습 중 움직임 자체를 억제
+        for k in list(base_scale.keys()):
+            if "Hip_Yaw" in k:
+                base_scale[k] = 0.01  # 거의 움직이지 못하도록
+        self.actions.joint_pos.scale = base_scale
 
 
         self.observations.policy.height_scan = None
