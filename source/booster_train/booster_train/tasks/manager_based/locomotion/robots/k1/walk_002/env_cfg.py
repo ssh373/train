@@ -131,7 +131,7 @@ class RewardsCfg:
     )
     track_ang_vel_z = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=1.5,
+        weight=3.0,
         params={"command_name": "base_velocity", "std": 0.1},  # std 0.25 → 0.15: yaw 추적 정밀도 강화
     )
 
