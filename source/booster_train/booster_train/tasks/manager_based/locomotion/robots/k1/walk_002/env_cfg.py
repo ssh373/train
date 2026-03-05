@@ -131,7 +131,7 @@ class RewardsCfg:
     )
     track_ang_vel_z = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=1.5,
+        weight=3.0,
         params={"command_name": "base_velocity", "std": 0.1},  # std 0.25 → 0.15: yaw 추적 정밀도 강화
     )
 
@@ -348,23 +348,6 @@ class RewardsCfg:
                 joint_names=["Left_Hip_Pitch", "Right_Hip_Pitch"],
             ),
             "vel_threshold": 0.03,
-        },
-    )
-
-    # ── Ankle Pitch 접지 활용 보상: 사람처럼 발목으로 안정적 접지 ──
-    ankle_pitch_stance = RewTerm(
-        func=mdp.ankle_pitch_stance_reward,
-        weight=1.0,
-        params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=["left_foot_link", "right_foot_link"],
-            ),
-            "asset_cfg": SceneEntityCfg(
-                "robot",
-                joint_names=["Left_Ankle_Pitch", "Right_Ankle_Pitch"],
-            ),
-            "target_range": (-0.3, 0.1),
         },
     )
 
