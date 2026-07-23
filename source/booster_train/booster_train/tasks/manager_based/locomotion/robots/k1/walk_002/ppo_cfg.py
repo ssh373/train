@@ -7,3 +7,4 @@ class PPORunnerCfg(BasePPORunnerCfg):
     max_iterations = 50000
     save_interval = 200
     experiment_name = "k1_walk_002"
+    logger = "wandb"

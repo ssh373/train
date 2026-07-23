@@ -1,0 +1,504 @@
+{
+  "input_csv": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\booster_robotics_sdk\\example\\data_collection\\002\\merged_walk_log.csv",
+  "output_fps": 50,
+  "base_height": 0.3,
+  "command_tol": 1e-06,
+  "trim_sec": 0.4,
+  "stop_trim_sec": 0.0,
+  "include_stop_segments": true,
+  "serial_order_json": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\serial_order.json",
+  "fixed_arm_joint_names": [
+    "ALeft_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch",
+    "Right_Shoulder_Roll",
+    "Right_Elbow_Pitch",
+    "Right_Elbow_Yaw"
+  ],
+  "fixed_arm_joint_values": [
+    0.0,
+    -1.3,
+    0.0,
+    -0.0,
+    0.0,
+    1.3,
+    0.0,
+    0.0
+  ],
+  "joint_names": [
+    "AAHead_yaw",
+    "Head_pitch",
+    "ALeft_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch",
+    "Right_Shoulder_Roll",
+    "Right_Elbow_Pitch",
+    "Right_Elbow_Yaw",
+    "Left_Hip_Pitch",
+    "Left_Hip_Roll",
+    "Left_Hip_Yaw",
+    "Left_Knee_Pitch",
+    "Left_Ankle_Pitch",
+    "Left_Ankle_Roll",
+    "Right_Hip_Pitch",
+    "Right_Hip_Roll",
+    "Right_Hip_Yaw",
+    "Right_Knee_Pitch",
+    "Right_Ankle_Pitch",
+    "Right_Ankle_Roll"
+  ],
+  "body_names": [
+    "Trunk",
+    "Head_2",
+    "Left_Hip_Roll",
+    "Left_Shank",
+    "left_foot_link",
+    "Right_Hip_Roll",
+    "Right_Shank",
+    "right_foot_link",
+    "Left_Arm_2",
+    "Left_Arm_3",
+    "left_hand_link",
+    "Right_Arm_2",
+    "Right_Arm_3",
+    "right_hand_link"
+  ],
+  "mapping_csv": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\joint_mapping.csv",
+  "mapping_json": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\joint_mapping.json",
+  "segment_summary_csv": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\segment_summary.csv",
+  "clips": [
+    {
+      "index": 1,
+      "command": [
+        0.2,
+        0.0,
+        0.0
+      ],
+      "start_time": 0.40000528000009583,
+      "end_time": 15.889814757000158,
+      "frame_count": 775,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0001_vxp0.20_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0001_vxp0.20_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 2,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 16.291730169000175,
+      "end_time": 20.321635017000062,
+      "frame_count": 202,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0002_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0002_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 3,
+      "command": [
+        -0.2,
+        0.0,
+        0.0
+      ],
+      "start_time": 20.72359875100019,
+      "end_time": 29.60196597000013,
+      "frame_count": 445,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0003_vxm0.20_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0003_vxm0.20_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 4,
+      "command": [
+        -0.5,
+        0.0,
+        0.0
+      ],
+      "start_time": 30.403964073000132,
+      "end_time": 44.767123276999975,
+      "frame_count": 719,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0004_vxm0.50_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0004_vxm0.50_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 5,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 45.16913184300006,
+      "end_time": 49.92834576600012,
+      "frame_count": 239,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0005_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0005_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 6,
+      "command": [
+        0.5,
+        0.0,
+        0.0
+      ],
+      "start_time": 50.33058153800007,
+      "end_time": 54.948672867000006,
+      "frame_count": 232,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0006_vxp0.50_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0006_vxp0.50_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 7,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 55.3507340430001,
+      "end_time": 57.79571540000006,
+      "frame_count": 123,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0007_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0007_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 8,
+      "command": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 58.1973373960001,
+      "end_time": 68.15412414200009,
+      "frame_count": 499,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0008_vxm1.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0008_vxm1.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 9,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 68.55607075500006,
+      "end_time": 70.79833749900013,
+      "frame_count": 113,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0009_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0009_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 10,
+      "command": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 71.200337873,
+      "end_time": 75.39400989300006,
+      "frame_count": 211,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0010_vxp1.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0010_vxp1.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 11,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 75.79661134000003,
+      "end_time": 79.21853619300009,
+      "frame_count": 172,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0011_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0011_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 12,
+      "command": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 79.62055148000005,
+      "end_time": 84.03861831700019,
+      "frame_count": 222,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0012_vxm1.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0012_vxm1.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 13,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 84.44092836300001,
+      "end_time": 86.87350119200005,
+      "frame_count": 123,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0013_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0013_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 14,
+      "command": [
+        0.0,
+        0.2,
+        0.0
+      ],
+      "start_time": 87.27543164400018,
+      "end_time": 93.91761106600015,
+      "frame_count": 333,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0014_vxp0.00_vyp0.20_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0014_vxp0.00_vyp0.20_vyawp0.00.npz"
+    },
+    {
+      "index": 15,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 94.31964356900016,
+      "end_time": 98.90647539600013,
+      "frame_count": 230,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0015_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0015_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 16,
+      "command": [
+        0.0,
+        -0.2,
+        0.0
+      ],
+      "start_time": 99.30862204700011,
+      "end_time": 107.35801671800013,
+      "frame_count": 403,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0016_vxp0.00_vym0.20_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0016_vxp0.00_vym0.20_vyawp0.00.npz"
+    },
+    {
+      "index": 17,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 107.75949547800019,
+      "end_time": 112.66893790800009,
+      "frame_count": 246,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0017_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0017_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 18,
+      "command": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "start_time": 113.07090628200004,
+      "end_time": 116.07482474700018,
+      "frame_count": 151,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0018_vxp0.00_vyp0.50_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0018_vxp0.00_vyp0.50_vyawp0.00.npz"
+    },
+    {
+      "index": 19,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 116.47624872200004,
+      "end_time": 120.83648419400015,
+      "frame_count": 219,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0019_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0019_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 20,
+      "command": [
+        0.0,
+        -0.5,
+        0.0
+      ],
+      "start_time": 121.2384317680002,
+      "end_time": 128.49205880400004,
+      "frame_count": 364,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0020_vxp0.00_vym0.50_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0020_vxp0.00_vym0.50_vyawp0.00.npz"
+    },
+    {
+      "index": 21,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 128.89391997500002,
+      "end_time": 132.14825668900016,
+      "frame_count": 164,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0021_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0021_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 22,
+      "command": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "start_time": 132.55072318900002,
+      "end_time": 138.4411922560001,
+      "frame_count": 295,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0022_vxp0.00_vyp1.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0022_vxp0.00_vyp1.00_vyawp0.00.npz"
+    },
+    {
+      "index": 23,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 138.84380535200012,
+      "end_time": 142.78872726500003,
+      "frame_count": 198,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0023_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0023_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 24,
+      "command": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "start_time": 143.190672375,
+      "end_time": 147.41259868699998,
+      "frame_count": 212,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0024_vxp0.00_vym1.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0024_vxp0.00_vym1.00_vyawp0.00.npz"
+    },
+    {
+      "index": 25,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 147.81499814400013,
+      "end_time": 152.0604396230001,
+      "frame_count": 213,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0025_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0025_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 26,
+      "command": [
+        0.0,
+        0.0,
+        0.5
+      ],
+      "start_time": 152.46309067100006,
+      "end_time": 162.7936736560001,
+      "frame_count": 517,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0026_vxp0.00_vyp0.00_vyawp0.50.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0026_vxp0.00_vyp0.00_vyawp0.50.npz"
+    },
+    {
+      "index": 27,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 163.195780818,
+      "end_time": 167.94482355500008,
+      "frame_count": 238,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0027_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0027_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 28,
+      "command": [
+        0.0,
+        0.0,
+        -0.5
+      ],
+      "start_time": 168.34680821700013,
+      "end_time": 175.600570617,
+      "frame_count": 364,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0028_vxp0.00_vyp0.00_vyawm0.50.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0028_vxp0.00_vyp0.00_vyawm0.50.npz"
+    },
+    {
+      "index": 29,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 176.00228125600006,
+      "end_time": 180.34641740799998,
+      "frame_count": 218,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0029_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0029_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 30,
+      "command": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "start_time": 180.74855381800003,
+      "end_time": 186.00601516800006,
+      "frame_count": 264,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0030_vxp0.00_vyp0.00_vyawp1.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0030_vxp0.00_vyp0.00_vyawp1.00.npz"
+    },
+    {
+      "index": 31,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 186.40864192800018,
+      "end_time": 189.0612655110001,
+      "frame_count": 134,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0031_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0031_vxp0.00_vyp0.00_vyawp0.00.npz"
+    },
+    {
+      "index": 32,
+      "command": [
+        0.0,
+        0.0,
+        -1.0
+      ],
+      "start_time": 189.46315506600004,
+      "end_time": 195.83902310100015,
+      "frame_count": 320,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0032_vxp0.00_vyp0.00_vyawm1.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0032_vxp0.00_vyp0.00_vyawm1.00.npz"
+    },
+    {
+      "index": 33,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 196.24088328000016,
+      "end_time": 198.80367668899999,
+      "frame_count": 129,
+      "csv_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\csv\\clip_0033_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "C:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\processed_walks_002\\npz\\clip_0033_vxp0.00_vyp0.00_vyawp0.00.npz"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+index,command_vx,command_vy,command_vyaw,start_time,end_time,frame_count,csv_path,npz_path
+1,0.2,0.0,0.0,0.2,0.7900000000000007,31,c:\Users\sinsu\Desktop\soccer_ws\train\_tmp_preprocess_stop_test\out\csv\clip_0001_vxp0.20_vyp0.00_vyawp0.00.csv,
+2,0.0,0.0,0.0,1.0000000000000007,1.290000000000001,16,c:\Users\sinsu\Desktop\soccer_ws\train\_tmp_preprocess_stop_test\out\csv\clip_0002_vxp0.00_vyp0.00_vyawp0.00.csv,
+3,0.0,0.1,0.0,1.5000000000000009,2.3899999999999886,45,c:\Users\sinsu\Desktop\soccer_ws\train\_tmp_preprocess_stop_test\out\csv\clip_0003_vxp0.00_vyp0.10_vyawp0.00.csv,

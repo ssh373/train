@@ -199,20 +199,20 @@ class RewardsCfg:
     )
 
 
-    # # 이족 보행 air-time: 한 발씩 번갈아 들도록 유도 (저속에서도 활성화)
-    # feet_air_time_biped = RewTerm(
-    #     func=mdp.feet_air_time_positive_biped,
-    #     weight=2.5,
-    #     params={
-    #         "command_name": "base_velocity",
-    #         "threshold": 0.6,
-    #         "sensor_cfg": SceneEntityCfg(
-    #             "contact_forces",
-    #             body_names=["left_foot_link", "right_foot_link"],
-    #         ),
-    #         "vel_threshold": 0.03,
-    #     },
-    # )
+    # 이족 보행 air-time: 한 발씩 번갈아 들도록 유도 (저속에서도 활성화)
+    feet_air_time_biped = RewTerm(
+        func=mdp.feet_air_time_positive_biped,
+        weight=2.5,
+        params={
+            "command_name": "base_velocity",
+            "threshold": 0.6,
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_foot_link", "right_foot_link"],
+            ),
+            "vel_threshold": 0.03,
+        },
+    )
 
     # # 발 들어올림... 스윙 중 발이 target 높이까지 올라가도록
     # foot_clearance = RewTerm(
@@ -280,7 +280,7 @@ class RewardsCfg:
     # 속도 비례 보폭 보상: 빠를수록 긴 스윙을 유도 (보폭 크게 강화)
     stride_length = RewTerm(
         func=mdp.stride_length_reward,
-        weight=2.0,
+        weight=3.0,
         params={
             "command_name": "base_velocity",
             "sensor_cfg": SceneEntityCfg(
@@ -388,8 +388,8 @@ class EventsCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "position_range": (-0.25, 0.25),
-            "velocity_range": (-0.2, 0.2),
+            "position_range": (-0.15, 0.15),
+            "velocity_range": (-0.1, 0.1),
         },
     )
 

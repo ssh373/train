@@ -1,0 +1,98 @@
+{
+  "input_csv": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\merged_walk_log.csv",
+  "output_fps": 50,
+  "base_height": 0.3,
+  "command_tol": 1e-06,
+  "trim_sec": 0.2,
+  "stop_trim_sec": 0.0,
+  "include_stop_segments": true,
+  "serial_order_json": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\serial_order.json",
+  "fixed_arm_joint_names": [],
+  "fixed_arm_joint_values": [],
+  "joint_names": [
+    "joint_0",
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+    "joint_6",
+    "joint_7",
+    "joint_8",
+    "joint_9",
+    "joint_10",
+    "joint_11",
+    "joint_12",
+    "joint_13",
+    "joint_14",
+    "joint_15",
+    "joint_16",
+    "joint_17",
+    "joint_18",
+    "joint_19",
+    "joint_20",
+    "joint_21",
+    "joint_22",
+    "joint_23"
+  ],
+  "body_names": [
+    "Trunk",
+    "Head_2",
+    "Left_Hip_Roll",
+    "Left_Shank",
+    "left_foot_link",
+    "Right_Hip_Roll",
+    "Right_Shank",
+    "right_foot_link",
+    "Left_Arm_2",
+    "Left_Arm_3",
+    "left_hand_link",
+    "Right_Arm_2",
+    "Right_Arm_3",
+    "right_hand_link"
+  ],
+  "mapping_csv": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\joint_mapping.csv",
+  "mapping_json": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\joint_mapping.json",
+  "segment_summary_csv": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\segment_summary.csv",
+  "clips": [
+    {
+      "index": 1,
+      "command": [
+        0.2,
+        0.0,
+        0.0
+      ],
+      "start_time": 0.2,
+      "end_time": 0.7900000000000007,
+      "frame_count": 31,
+      "csv_path": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\csv\\clip_0001_vxp0.20_vyp0.00_vyawp0.00.csv",
+      "npz_path": "."
+    },
+    {
+      "index": 2,
+      "command": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "start_time": 1.0000000000000007,
+      "end_time": 1.290000000000001,
+      "frame_count": 16,
+      "csv_path": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\csv\\clip_0002_vxp0.00_vyp0.00_vyawp0.00.csv",
+      "npz_path": "."
+    },
+    {
+      "index": 3,
+      "command": [
+        0.0,
+        0.1,
+        0.0
+      ],
+      "start_time": 1.5000000000000009,
+      "end_time": 2.3899999999999886,
+      "frame_count": 45,
+      "csv_path": "c:\\Users\\sinsu\\Desktop\\soccer_ws\\train\\_tmp_preprocess_stop_test\\out\\csv\\clip_0003_vxp0.00_vyp0.10_vyawp0.00.csv",
+      "npz_path": "."
+    }
+  ]
+}

@@ -379,16 +379,28 @@ def randomize_rigid_body_com(
     else:
         body_ids = torch.tensor(asset_cfg.body_ids, dtype=torch.int, device="cpu")
 
-    # sample random CoM values
+    # Cache the unmodified CoM once.  This event is used in reset mode, so
+    # sampling from the current values would otherwise accumulate offsets over
+    # episodes instead of randomizing around the URDF values.
+    if not hasattr(asset, "_default_com_for_randomization"):
+        asset._default_com_for_randomization = asset.root_physx_view.get_coms().clone()
+
+    # sample independent random CoM values for every selected environment/body
     range_list = [com_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z"]]
     ranges = torch.tensor(range_list, device="cpu")
-    rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 3), device="cpu").unsqueeze(1)
+    rand_samples = math_utils.sample_uniform(
+        ranges[:, 0], ranges[:, 1], (len(env_ids), len(body_ids), 3), device="cpu"
+    )
 
-    # get the current com of the bodies (num_assets, num_bodies)
+    # get the current CoM buffer and reset only the requested slice to defaults
     coms = asset.root_physx_view.get_coms().clone()
+    coms[env_ids[:, None], body_ids, :3] = asset._default_com_for_randomization[
+        env_ids[:, None], body_ids, :3
+    ]
 
-    # Randomize the com in range
-    coms[:, body_ids, :3] += rand_samples
+    # Randomize only the environments being reset.  Indexing all environments
+    # here caused a 4096-vs-num_bodies broadcast failure on partial resets.
+    coms[env_ids[:, None], body_ids, :3] += rand_samples
 
     # Set the new coms
     asset.root_physx_view.set_coms(coms, env_ids)

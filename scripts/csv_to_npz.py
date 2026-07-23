@@ -248,6 +248,18 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
     file_saved = False
     # --------------------------------------------------------------------------
 
+    # Prepare foot body indexes to place feet on ground (if present)
+    ground_clearance = 0.05
+    foot_candidates = [
+        "left_foot_link",
+        "right_foot_link",
+        "Left_Ankle_Cross",
+        "Right_Ankle_Cross",
+        "left_foot",
+        "right_foot",
+    ]
+    foot_indexes = [i for i, name in enumerate(robot.body_names) if name in foot_candidates]
+
     # Simulation loop
     while simulation_app.is_running():
         (
@@ -262,9 +274,10 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             reset_flag,
         ) = motion.get_next_state()
 
-        # set root state
+        # set root state (use CSV XY but start with z=0, we'll adjust to put feet on ground)
         root_states = robot.data.default_root_state.clone()
-        root_states[:, :3] = motion_base_pos
+        root_states[:, :2] = motion_base_pos[:, :2]
+        root_states[:, 2] = 0.0
         root_states[:, :2] += scene.env_origins[:, :2]
         root_states[:, 3:7] = motion_base_rot
         root_states[:, 7:10] = motion_base_lin_vel
@@ -277,8 +290,21 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
         joint_pos[:, robot_joint_indexes] = motion_dof_pos
         joint_vel[:, robot_joint_indexes] = motion_dof_vel
         robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        sim.render()  # We don't want physic (sim.step())
+
+        # render and update once so FK is computed
+        sim.render()  # We don't want physics (sim.step())
         scene.update(sim.get_physics_dt())
+
+        # If we have foot bodies, compute min foot z and shift root z so feet sit on ground (z=0)
+        if foot_indexes:
+            foot_zs = robot.data.body_pos_w[0, foot_indexes, 2].cpu().numpy()
+            min_foot_z = float(np.min(foot_zs))
+            # set root z so that lowest foot stays slightly above ground
+            root_states[:, 2] = -(min_foot_z - ground_clearance)
+            robot.write_root_state_to_sim(root_states)
+            # update again to refresh FK with new root z
+            sim.render()
+            scene.update(sim.get_physics_dt())
 
         pos_lookat = root_states[0, :3].cpu().numpy()
         sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
