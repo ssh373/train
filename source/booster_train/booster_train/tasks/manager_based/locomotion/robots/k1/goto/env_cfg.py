@@ -203,13 +203,13 @@ class EventsCfg:
                            "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)}})
     reset_joints = EventTerm(func=common_mdp.reset_joints_by_offset, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.05, 0.05), "velocity_range": (0.0, 0.0)})
-    friction = EventTerm(func=common_mdp.randomize_rigid_body_material, mode="reset", params={
+    friction = EventTerm(func=common_mdp.randomize_rigid_body_material, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET), "static_friction_range": (0.8, 1.2),
         "dynamic_friction_range": (0.7, 1.1), "restitution_range": (0.0, 0.0), "num_buckets": 32})
-    body_mass = EventTerm(func=common_mdp.randomize_rigid_body_mass, mode="reset", params={
+    body_mass = EventTerm(func=common_mdp.randomize_rigid_body_mass, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=".*"), "mass_distribution_params": (0.9, 1.1),
         "operation": "scale"})
-    body_com = EventTerm(func=common_mdp.randomize_rigid_body_com, mode="reset", params={
+    body_com = EventTerm(func=common_mdp.randomize_rigid_body_com, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
         "com_range": {"x": (-0.005, 0.005), "y": (-0.005, 0.005), "z": (-0.005, 0.005)}})
     pd_gains = EventTerm(func=common_mdp.randomize_actuator_gains, mode="reset", params={
