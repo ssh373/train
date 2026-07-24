@@ -168,6 +168,83 @@ def feet_grounded(env, sensor_cfg=SceneEntityCfg("contact_forces", body_names=["
     return grounded.float().unsqueeze(-1)
 
 
+def feet_lateral_spacing_l2(
+    env,
+    target_spacing: float,
+    asset_cfg=SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
+):
+    """Penalize deviation from a nominal left/right foot spacing in the body frame."""
+    robot = env.scene[asset_cfg.name]
+    feet_w = robot.data.body_pos_w[:, asset_cfg.body_ids, :2]
+    delta_w = feet_w[:, 0] - feet_w[:, 1]
+    yaw = robot.data.heading_w
+    lateral_delta = -torch.sin(yaw) * delta_w[:, 0] + torch.cos(yaw) * delta_w[:, 1]
+    return torch.square(lateral_delta - target_spacing)
+
+
+def feet_crossing_penalty(
+    env,
+    minimum_spacing: float,
+    asset_cfg=SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
+):
+    """Penalize feet that cross or approach closer than the safe lateral gap."""
+    robot = env.scene[asset_cfg.name]
+    feet_w = robot.data.body_pos_w[:, asset_cfg.body_ids, :2]
+    delta_w = feet_w[:, 0] - feet_w[:, 1]
+    yaw = robot.data.heading_w
+    lateral_delta = -torch.sin(yaw) * delta_w[:, 0] + torch.cos(yaw) * delta_w[:, 1]
+    return torch.square(torch.clamp(minimum_spacing - lateral_delta, min=0.0))
+
+
+def sustained_random_push(
+    env,
+    env_ids,
+    push_interval_s: float,
+    push_duration_s: float,
+    force_magnitude_range: tuple[float, float],
+    torque_range: tuple[float, float],
+    asset_cfg=SceneEntityCfg("robot", body_names="Trunk"),
+):
+    """Apply a random horizontal trunk force continuously for part of each interval."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=robot.device)
+    else:
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=robot.device)
+
+    body_ids = asset_cfg.body_ids
+    num_bodies = len(body_ids) if isinstance(body_ids, list) else robot.num_bodies
+    buffer_shape = (env.num_envs, num_bodies, 3)
+    if not hasattr(env, "goto_push_forces"):
+        env.goto_push_forces = torch.zeros(buffer_shape, device=robot.device)
+        env.goto_push_torques = torch.zeros_like(env.goto_push_forces)
+
+    interval_steps = max(2, int(round(push_interval_s / env.step_dt)))
+    duration_steps = max(1, min(interval_steps - 1, int(round(push_duration_s / env.step_dt))))
+    start_step = interval_steps - duration_steps
+    phase = int(env.common_step_counter) % interval_steps
+
+    if phase == 0:
+        env.goto_push_forces[env_ids].zero_()
+        env.goto_push_torques[env_ids].zero_()
+    elif phase == start_step:
+        angle = 2.0 * math.pi * torch.rand(len(env_ids), num_bodies, device=robot.device)
+        magnitude = torch.empty(len(env_ids), num_bodies, device=robot.device).uniform_(
+            *force_magnitude_range
+        )
+        env.goto_push_forces[env_ids, :, 0] = magnitude * torch.cos(angle)
+        env.goto_push_forces[env_ids, :, 1] = magnitude * torch.sin(angle)
+        env.goto_push_forces[env_ids, :, 2] = 0.0
+        env.goto_push_torques[env_ids].uniform_(*torque_range)
+
+    robot.set_external_force_and_torque(
+        env.goto_push_forces[env_ids],
+        env.goto_push_torques[env_ids],
+        env_ids=env_ids,
+        body_ids=body_ids,
+    )
+
+
 def body_linear_velocity_w(env, asset_cfg=SceneEntityCfg("robot")):
     robot = env.scene[asset_cfg.name]
     return robot.data.body_lin_vel_w[:, asset_cfg.body_ids].reshape(env.num_envs, -1)

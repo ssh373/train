@@ -2,8 +2,18 @@
 
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg, RslRlPpoAlgorithmCfg,
+    RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg,
 )
+
+from .recurrent_symmetry import RecurrentSymmetryPPO
+from .symmetry import data_augmentation_func
+
+# OnPolicyRunner 2.3.1 resolves the algorithm from its module-level ``PPO``
+# symbol.  Keep class_name="PPO" (required for RL training type detection) and
+# replace that symbol only when this GoTo agent configuration is imported.
+import rsl_rl.runners.on_policy_runner as _runner_module
+
+_runner_module.PPO = RecurrentSymmetryPPO
 
 
 @configclass
@@ -29,11 +39,15 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         entropy_coef=0.005, num_learning_epochs=5, num_mini_batches=4,
         learning_rate=1.0e-3, schedule="adaptive", gamma=0.99, lam=0.95,
         desired_kl=0.01, max_grad_norm=1.0,
-        # RSL-RL 2.3.1's symmetry update does not augment recurrent masks and
-        # hidden states together with sequence observations.  Keep symmetry
-        # fully disabled for the runnable LSTM baseline; symmetry.py retains
-        # the verified K1 reflection for a future recurrent-aware PPO patch.
-        symmetry_cfg=None,
+        # The custom PPO consumes this config to obtain the wrapped environment;
+        # stock update-time augmentation is replaced by paired recurrent
+        # trajectories in RecurrentSymmetryPPO.
+        symmetry_cfg=RslRlSymmetryCfg(
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+            data_augmentation_func=data_augmentation_func,
+        ),
     )
 
 

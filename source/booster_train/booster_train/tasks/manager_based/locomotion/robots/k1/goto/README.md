@@ -5,6 +5,9 @@ This task implements a single recurrent, goal-conditioned policy. It consumes K1
 joints. There is no velocity command or high-level controller. Physics runs at 200 Hz and the policy at 50 Hz,
 matching both the paper and this repository's existing K1 locomotion controller.
 
+Episodes last 30 seconds while pose goals are still resampled every 4--8 seconds. This exposes the recurrent policy
+to several goal transitions and disturbance/recovery cycles without resetting its LSTM state between goals.
+
 The paper defaults are `radius=1 m`, `inertia=1`, and constellation exponent weight `0.2`. They are exposed in
 `RewardsCfg`; the radius is documentation/tuning metadata while the analytic implementation uses the independently
 configurable inertia. K1 is smaller than Digit, so these parameters should be tuned rather than treated as universal.
@@ -17,9 +20,20 @@ recurrent exporter represents LSTM hidden and cell state in recurrent TorchScrip
 part of environment state and is reset by the action manager.
 
 `symmetry.py` provides a K1 reflection resolved from articulation joint names at runtime: pitch joints keep sign,
-while roll/yaw joints and lateral/yaw goals change sign. Mirror loss is disabled in the default recurrent config
-because RSL-RL 2.3.1 does not augment recurrent masks/hidden states together with sequences. Enabling it safely
-requires a recurrent-aware PPO symmetry patch; the default LSTM task remains runnable without that patch.
+while roll/yaw joints and lateral/yaw goals change sign. `recurrent_symmetry.py` applies it as rollout-time data
+augmentation: every real trajectory is interleaved with a virtual mirrored trajectory that owns its own LSTM
+hidden/cell state and done mask. This avoids RSL-RL 2.3.1's update-time recurrent shape mismatch. It is symmetric
+data augmentation rather than an additional update-time mirror-loss term.
+
+Training resets intentionally include small non-zero joint/root velocities and roll/pitch offsets, and periodic
+velocity pushes exercise recovery from moving states such as a kick-to-walk handoff. The gait-style terms maintain
+an 0.18 m nominal lateral foot gap, strongly penalize crossing below 0.10 m, reward roughly 4.5 cm swing clearance,
+and weakly regularize left/right contact-time balance. These are regularizers rather than hard references so the
+policy can still use asymmetric steps for lateral and turning goals.
+
+Robustness training also applies a sustained random trunk disturbance: after four undisturbed seconds, each
+environment receives an independently directed 5--15 N horizontal force and up to 1 N m torque for one second.
+The cycle repeats every five seconds and is disabled in the Play configuration.
 
 Mechanical energy evaluation integrates absolute joint power, `sum(abs(tau*qdot))*dt`; this is a stable mechanical
 effort measure, not signed regenerative energy. The evaluator counts swing-to-contact transitions. Contact history

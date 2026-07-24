@@ -180,6 +180,19 @@ class RewardsCfg:
     foot_slip = RewTerm(func=common_mdp.feet_slide, weight=-0.1, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    foot_spacing = RewTerm(func=mdp.feet_lateral_spacing_l2, weight=-2.0, params={
+        "target_spacing": 0.18,
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    foot_crossing = RewTerm(func=mdp.feet_crossing_penalty, weight=-10.0, params={
+        "minimum_spacing": 0.10,
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    foot_clearance = RewTerm(func=common_mdp.foot_clearance_reward, weight=0.15, params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
+        "target_height": 0.045, "std": 0.02, "tanh_mult": 2.0})
+    contact_symmetry = RewTerm(func=common_mdp.gait_contact_symmetry_penalty, weight=-0.05, params={
+        "command_name": "pose_goal",
+        "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
+        "vel_threshold": 0.10})
     undesired_contact = RewTerm(func=common_mdp.undesired_contacts, weight=-1.0, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[r"^(?!left_foot_link$)(?!right_foot_link$).+$"]),
         "threshold": 1.0})
@@ -198,11 +211,28 @@ class TerminationsCfg:
 class EventsCfg:
     reset_base = EventTerm(func=common_mdp.reset_root_state_uniform, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"),
-        "pose_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "yaw": (-math.pi, math.pi)},
-        "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
-                           "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)}})
+        "pose_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2),
+                       "roll": (-0.06, 0.06), "pitch": (-0.08, 0.08),
+                       "yaw": (-math.pi, math.pi)},
+        "velocity_range": {"x": (-0.25, 0.25), "y": (-0.20, 0.20), "z": (-0.05, 0.05),
+                           "roll": (-0.40, 0.40), "pitch": (-0.50, 0.50),
+                           "yaw": (-0.30, 0.30)}})
     reset_joints = EventTerm(func=common_mdp.reset_joints_by_offset, mode="reset", params={
-        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.05, 0.05), "velocity_range": (0.0, 0.0)})
+        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.08, 0.08),
+        "velocity_range": (-0.35, 0.35)})
+    recovery_push = EventTerm(func=common_mdp.push_by_setting_velocity, mode="interval",
+                              interval_range_s=(3.0, 6.0), params={
+        "asset_cfg": SceneEntityCfg("robot"),
+        "velocity_range": {"x": (-0.35, 0.35), "y": (-0.30, 0.30),
+                           "roll": (-0.25, 0.25), "pitch": (-0.30, 0.30),
+                           "yaw": (-0.20, 0.20)}})
+    sustained_push = EventTerm(func=mdp.sustained_random_push, mode="interval",
+                               interval_range_s=(0.02, 0.02), params={
+        "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
+        "push_interval_s": 5.0,
+        "push_duration_s": 1.0,
+        "force_magnitude_range": (5.0, 15.0),
+        "torque_range": (-1.0, 1.0)})
     friction = EventTerm(func=common_mdp.randomize_rigid_body_material, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET), "static_friction_range": (0.8, 1.2),
         "dynamic_friction_range": (0.7, 1.1), "restitution_range": (0.0, 0.0), "num_buckets": 32})
@@ -235,7 +265,7 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 4
-        self.episode_length_s = 8.0
+        self.episode_length_s = 30.0
         self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
         self.scene.contact_forces.update_period = self.sim.dt
@@ -274,5 +304,7 @@ class K1GoToPlayEnvCfg(K1GoToEnvCfg):
         self.events.body_mass = None
         self.events.body_com = None
         self.events.pd_gains = None
+        self.events.recovery_push = None
+        self.events.sustained_push = None
         self.observations.policy.enable_corruption = False
         self.commands.pose_goal.debug_vis = True
