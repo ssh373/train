@@ -25,6 +25,16 @@ augmentation: every real trajectory is interleaved with a virtual mirrored traje
 hidden/cell state and done mask. This avoids RSL-RL 2.3.1's update-time recurrent shape mismatch. It is symmetric
 data augmentation rather than an additional update-time mirror-loss term.
 
+The same GoTo-only PPO wrapper maps RSL-RL 2.3.1's unconstrained recurrent `std` parameter through `softplus`.
+This keeps the Normal action scale positive across optimizer steps without modifying the shared RSL-RL or Isaac Lab
+packages. The raw parameter retains the `std` checkpoint key, and fresh runs still start at an actual standard
+deviation of 1.0.
+Non-finite gradients of that raw scale are discarded before they can poison Adam's moving-average state. Resume
+only checkpoints created with this guard; start a fresh run after any `normal expects all elements of std >= 0.0`
+failure because the failed optimizer state may already contain NaNs.
+When this guard activates, training prints a rate-limited warning after the PPO iteration with both the new event
+count and cumulative number of affected scalar gradient values. No warning means that the guard has not activated.
+
 Training resets intentionally include small non-zero joint/root velocities and roll/pitch offsets, and periodic
 velocity pushes exercise recovery from moving states such as a kick-to-walk handoff. The gait-style terms maintain
 an 0.18 m nominal lateral foot gap, strongly penalize crossing below 0.10 m, reward roughly 4.5 cm swing clearance,

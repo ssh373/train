@@ -9,7 +9,12 @@ states and share rewards/dones under the task's left/right symmetry.
 
 from __future__ import annotations
 
+import math
+import types
+
 import torch
+import torch.nn.functional as F
+from torch.distributions import Normal
 from rsl_rl.algorithms import PPO
 
 from .symmetry import mirror_actions, mirror_observations
@@ -20,21 +25,88 @@ def _interleave(original: torch.Tensor, mirrored: torch.Tensor) -> torch.Tensor:
     return torch.stack((original, mirrored), dim=1).flatten(0, 1)
 
 
+def _install_positive_std(policy, init_noise_std: float) -> None:
+    """Keep this task's learned Normal scale strictly positive.
+
+    RSL-RL 2.3.1's recurrent actor stores the Normal scale directly in
+    ``policy.std``.  Since that parameter is unconstrained, a PPO optimizer
+    step can make it negative and the following mini-batch then fails in
+    ``torch.normal``.  Reinterpret the same checkpoint-compatible parameter as
+    an unconstrained value and map it through softplus whenever GoTo creates a
+    distribution.
+    """
+    if not hasattr(policy, "std"):
+        raise TypeError("GoTo positive-std guard requires an RSL-RL policy.std parameter")
+    if init_noise_std <= 0.0:
+        raise ValueError("init_noise_std must be positive")
+
+    # softplus(raw_std) == init_noise_std at the start of a fresh run.  The
+    # parameter remains named ``std``, so GoTo checkpoints remain loadable.
+    raw_initial_std = math.log(math.expm1(init_noise_std))
+    with torch.no_grad():
+        policy.std.fill_(raw_initial_std)
+
+    # Device-side counters avoid synchronizing the GPU on every mini-batch.
+    # RecurrentSymmetryPPO reads them only once after each PPO iteration.
+    policy._goto_invalid_std_grad_events = torch.zeros((), dtype=torch.long, device=policy.std.device)
+    policy._goto_invalid_std_grad_values = torch.zeros((), dtype=torch.long, device=policy.std.device)
+
+    # A non-finite std gradient makes Adam's moving averages permanently NaN;
+    # global norm clipping cannot repair that because the norm is NaN too.
+    # Drop only the invalid entries while leaving all finite exploration
+    # gradients untouched.
+    def sanitize_std_gradient(gradient: torch.Tensor) -> torch.Tensor:
+        invalid = ~torch.isfinite(gradient)
+        policy._goto_invalid_std_grad_events.add_(invalid.any())
+        policy._goto_invalid_std_grad_values.add_(invalid.sum())
+        return torch.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
+
+    policy.std.register_hook(sanitize_std_gradient)
+
+    def update_distribution_with_positive_std(self, observations):
+        mean = self.actor(observations)
+        if not torch.isfinite(self.std).all():
+            raise FloatingPointError(
+                "GoTo policy raw std became NaN/Inf. Start a fresh run; "
+                "do not resume a checkpoint produced before the std-gradient guard."
+            )
+        scale = F.softplus(self.std).clamp(min=1.0e-4, max=5.0)
+        self.distribution = Normal(mean, mean * 0.0 + scale)
+
+    policy.update_distribution = types.MethodType(update_distribution_with_positive_std, policy)
+
+
 class RecurrentSymmetryPPO(PPO):
     """PPO with paired mirrored rollout trajectories for recurrent policies."""
 
     def __init__(self, policy, *args, symmetry_cfg=None, **kwargs):
         if symmetry_cfg is None or "_env" not in symmetry_cfg:
             raise ValueError("RecurrentSymmetryPPO requires symmetry_cfg with the wrapped environment")
-        if not symmetry_cfg.get("use_data_augmentation", False):
-            raise ValueError("RecurrentSymmetryPPO requires use_data_augmentation=True")
         self.symmetry_env = symmetry_cfg["_env"]
+        init_noise_std = float(policy.std.detach().mean().item())
+        _install_positive_std(policy, init_noise_std)
         # The stock update-time symmetry path is deliberately disabled.  Its
         # recurrent masks/hidden states are incompatible with augmentation.
         super().__init__(policy, *args, symmetry_cfg=None, **kwargs)
+        self._last_invalid_std_grad_events = 0
         if not self.policy.is_recurrent:
             raise ValueError("RecurrentSymmetryPPO is intended for a recurrent policy")
+        print("[INFO] GoTo policy std uses a strictly-positive softplus parameterization.")
         print("[INFO] Recurrent symmetry enabled: one mirrored LSTM trajectory per real environment.")
+
+    def update(self):
+        loss_dict = super().update()
+        total_events = int(self.policy._goto_invalid_std_grad_events.item())
+        if total_events != self._last_invalid_std_grad_events:
+            new_events = total_events - self._last_invalid_std_grad_events
+            total_values = int(self.policy._goto_invalid_std_grad_values.item())
+            print(
+                "[WARNING] GoTo discarded non-finite std gradients: "
+                f"{new_events} update(s) this iteration, {total_events} total "
+                f"({total_values} scalar value(s))."
+            )
+            self._last_invalid_std_grad_events = total_events
+        return loss_dict
 
     def init_storage(
         self,
