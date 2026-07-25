@@ -50,6 +50,7 @@ def _install_positive_std(policy, init_noise_std: float) -> None:
     # RecurrentSymmetryPPO reads them only once after each PPO iteration.
     policy._goto_invalid_std_grad_events = torch.zeros((), dtype=torch.long, device=policy.std.device)
     policy._goto_invalid_std_grad_values = torch.zeros((), dtype=torch.long, device=policy.std.device)
+    policy._goto_std_optimizer_repairs = torch.zeros((), dtype=torch.long, device=policy.std.device)
 
     # A non-finite std gradient makes Adam's moving averages permanently NaN;
     # global norm clipping cannot repair that because the norm is NaN too.
@@ -76,6 +77,33 @@ def _install_positive_std(policy, init_noise_std: float) -> None:
     policy.update_distribution = types.MethodType(update_distribution_with_positive_std, policy)
 
 
+def _install_std_optimizer_guard(policy, optimizer) -> None:
+    """Repair only GoTo's std parameter/state immediately after an Adam step."""
+    # These raw bounds map through softplus to approximately [1e-4, 5.0].
+    raw_min = math.log(math.expm1(1.0e-4))
+    raw_max = math.log(math.expm1(5.0))
+    last_finite_std = policy.std.detach().clone()
+
+    def guard_std_after_step(_optimizer, _args, _kwargs):
+        nonlocal last_finite_std
+        with torch.no_grad():
+            invalid = ~torch.isfinite(policy.std)
+            if invalid.any():
+                policy.std[invalid] = last_finite_std[invalid]
+                policy._goto_std_optimizer_repairs.add_(invalid.sum())
+
+                # Adam's moment buffers can otherwise write NaN back on every
+                # following step, even after the parameter itself is repaired.
+                for state_value in optimizer.state.get(policy.std, {}).values():
+                    if torch.is_tensor(state_value) and state_value.shape == policy.std.shape:
+                        state_value[invalid] = 0.0
+
+            policy.std.clamp_(min=raw_min, max=raw_max)
+            last_finite_std.copy_(policy.std)
+
+    optimizer.register_step_post_hook(guard_std_after_step)
+
+
 class RecurrentSymmetryPPO(PPO):
     """PPO with paired mirrored rollout trajectories for recurrent policies."""
 
@@ -88,7 +116,9 @@ class RecurrentSymmetryPPO(PPO):
         # The stock update-time symmetry path is deliberately disabled.  Its
         # recurrent masks/hidden states are incompatible with augmentation.
         super().__init__(policy, *args, symmetry_cfg=None, **kwargs)
+        _install_std_optimizer_guard(self.policy, self.optimizer)
         self._last_invalid_std_grad_events = 0
+        self._last_std_optimizer_repairs = 0
         if not self.policy.is_recurrent:
             raise ValueError("RecurrentSymmetryPPO is intended for a recurrent policy")
         print("[INFO] GoTo policy std uses a strictly-positive softplus parameterization.")
@@ -106,6 +136,14 @@ class RecurrentSymmetryPPO(PPO):
                 f"({total_values} scalar value(s))."
             )
             self._last_invalid_std_grad_events = total_events
+        total_repairs = int(self.policy._goto_std_optimizer_repairs.item())
+        if total_repairs != self._last_std_optimizer_repairs:
+            new_repairs = total_repairs - self._last_std_optimizer_repairs
+            print(
+                "[WARNING] GoTo repaired non-finite std after Adam step: "
+                f"{new_repairs} scalar value(s) this iteration, {total_repairs} total."
+            )
+            self._last_std_optimizer_repairs = total_repairs
         return loss_dict
 
     def init_storage(

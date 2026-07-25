@@ -34,6 +34,8 @@ only checkpoints created with this guard; start a fresh run after any `normal ex
 failure because the failed optimizer state may already contain NaNs.
 When this guard activates, training prints a rate-limited warning after the PPO iteration with both the new event
 count and cumulative number of affected scalar gradient values. No warning means that the guard has not activated.
+An additional post-Adam guard restores a non-finite raw scale to its last valid value and clears only the matching
+Adam moment entries. Its warning reports how many scalar scale parameters required repair.
 
 Training resets intentionally include small non-zero joint/root velocities and roll/pitch offsets, and periodic
 velocity pushes exercise recovery from moving states such as a kick-to-walk handoff. The gait-style terms maintain
