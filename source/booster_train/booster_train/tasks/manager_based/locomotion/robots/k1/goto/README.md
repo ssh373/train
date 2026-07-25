@@ -1,41 +1,21 @@
 # Booster K1 GoTo
 
-This task implements a single recurrent, goal-conditioned policy. It consumes K1 proprioception and
+This task implements a single feed-forward, goal-conditioned policy. It consumes K1 proprioception, previous action, and
 `[dx_body, dy_body, sin(dyaw), cos(dyaw)]`, and directly emits residual position targets for all 12 actuated leg
 joints. There is no velocity command or high-level controller. Physics runs at 200 Hz and the policy at 50 Hz,
 matching both the paper and this repository's existing K1 locomotion controller.
 
-Episodes last 30 seconds while pose goals are still resampled every 4--8 seconds. This exposes the recurrent policy
-to several goal transitions and disturbance/recovery cycles without resetting its LSTM state between goals.
+Episodes last 30 seconds while pose goals are still resampled every 4--8 seconds. The policy reacts to each current
+goal without recurrent hidden/cell state; joint velocity, body angular velocity, and previous action provide motion context.
 
 The paper defaults are `radius=1 m`, `inertia=1`, and constellation exponent weight `0.2`. They are exposed in
 `RewardsCfg`; the radius is documentation/tuning metadata while the analytic implementation uses the independently
 configurable inertia. K1 is smaller than Digit, so these parameters should be tuned rather than treated as universal.
 The fall threshold is `0.60 * 0.57 m`, based on K1's configured nominal root height instead of Digit's 0.4 m.
 
-RSL-RL 2.3.1's `ActorCriticRecurrent` resets hidden/cell state from the environment `done` mask. A goal resample does
-not create a done, so memory persists. Runner checkpoints contain policy, optimizer, iteration, and empirical
-normalizer state; inference must call `policy.reset(dones)` when managing the actor module directly. Isaac Lab's
-recurrent exporter represents LSTM hidden and cell state in recurrent TorchScript/ONNX exports. Previous action is
-part of environment state and is reset by the action manager.
-
 `symmetry.py` provides a K1 reflection resolved from articulation joint names at runtime: pitch joints keep sign,
-while roll/yaw joints and lateral/yaw goals change sign. `recurrent_symmetry.py` applies it as rollout-time data
-augmentation: every real trajectory is interleaved with a virtual mirrored trajectory that owns its own LSTM
-hidden/cell state and done mask. This avoids RSL-RL 2.3.1's update-time recurrent shape mismatch. It is symmetric
-data augmentation rather than an additional update-time mirror-loss term.
-
-The same GoTo-only PPO wrapper maps RSL-RL 2.3.1's unconstrained recurrent `std` parameter through `softplus`.
-This keeps the Normal action scale positive across optimizer steps without modifying the shared RSL-RL or Isaac Lab
-packages. The raw parameter retains the `std` checkpoint key, and fresh runs still start at an actual standard
-deviation of 1.0.
-Non-finite gradients of that raw scale are discarded before they can poison Adam's moving-average state. Resume
-only checkpoints created with this guard; start a fresh run after any `normal expects all elements of std >= 0.0`
-failure because the failed optimizer state may already contain NaNs.
-When this guard activates, training prints a rate-limited warning after the PPO iteration with both the new event
-count and cumulative number of affected scalar gradient values. No warning means that the guard has not activated.
-An additional post-Adam guard restores a non-finite raw scale to its last valid value and clears only the matching
-Adam moment entries. Its warning reports how many scalar scale parameters required repair.
+while roll/yaw joints and lateral/yaw goals change sign. The standard feed-forward PPO applies this reflection as
+update-time data augmentation. Action standard deviation uses `exp(log_std)`, so it remains positive by construction.
 
 Training resets intentionally include small non-zero joint/root velocities and roll/pitch offsets, and periodic
 velocity pushes exercise recovery from moving states such as a kick-to-walk handoff. The gait-style terms maintain
@@ -62,5 +42,5 @@ python scripts/rsl_rl/evaluate_goto.py --checkpoint <checkpoint> --headless --ou
 python scripts/rsl_rl/play.py --task Booster-K1-GoTo-v0-Play --checkpoint <checkpoint> --headless
 ```
 
-The final `play.py` command exports recurrent TorchScript and ONNX under the checkpoint run's `exported` directory.
+The final `play.py` command exports feed-forward TorchScript and ONNX under the checkpoint run's `exported` directory.
 Use the smoke task for wiring checks only; it has 64 environments and five PPO iterations. Full training uses 4096.

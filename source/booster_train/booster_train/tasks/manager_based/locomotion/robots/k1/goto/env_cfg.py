@@ -212,40 +212,31 @@ class EventsCfg:
     reset_base = EventTerm(func=common_mdp.reset_root_state_uniform, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"),
         "pose_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2),
-                       "roll": (-0.06, 0.06), "pitch": (-0.08, 0.08),
+                       "roll": (-0.01, 0.01), "pitch": (-0.01, 0.01),
                        "yaw": (-math.pi, math.pi)},
-        "velocity_range": {"x": (-0.25, 0.25), "y": (-0.20, 0.20), "z": (-0.05, 0.05),
-                           "roll": (-0.40, 0.40), "pitch": (-0.50, 0.50),
-                           "yaw": (-0.30, 0.30)}})
+        "velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (0.0, 0.0),
+                           "roll": (-0.05, 0.05), "pitch": (-0.05, 0.05),
+                           "yaw": (-0.05, 0.05)}})
     reset_joints = EventTerm(func=common_mdp.reset_joints_by_offset, mode="reset", params={
-        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.08, 0.08),
-        "velocity_range": (-0.35, 0.35)})
-    recovery_push = EventTerm(func=common_mdp.push_by_setting_velocity, mode="interval",
-                              interval_range_s=(3.0, 6.0), params={
-        "asset_cfg": SceneEntityCfg("robot"),
-        "velocity_range": {"x": (-0.35, 0.35), "y": (-0.30, 0.30),
-                           "roll": (-0.25, 0.25), "pitch": (-0.30, 0.30),
-                           "yaw": (-0.20, 0.20)}})
-    sustained_push = EventTerm(func=mdp.sustained_random_push, mode="interval",
-                               interval_range_s=(0.02, 0.02), params={
-        "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-        "push_interval_s": 5.0,
-        "push_duration_s": 1.0,
-        "force_magnitude_range": (5.0, 15.0),
-        "torque_range": (-1.0, 1.0)})
+        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.02, 0.02),
+        "velocity_range": (-0.05, 0.05)})
+    # Initial curriculum stage: enable and widen these events after the policy
+    # has learned stable balance and goal-directed locomotion.
+    recovery_push = None
+    sustained_push = None
     friction = EventTerm(func=common_mdp.randomize_rigid_body_material, mode="startup", params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET), "static_friction_range": (0.8, 1.2),
-        "dynamic_friction_range": (0.7, 1.1), "restitution_range": (0.0, 0.0), "num_buckets": 32})
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET), "static_friction_range": (0.95, 1.05),
+        "dynamic_friction_range": (0.90, 1.00), "restitution_range": (0.0, 0.0), "num_buckets": 16})
     body_mass = EventTerm(func=common_mdp.randomize_rigid_body_mass, mode="startup", params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=".*"), "mass_distribution_params": (0.9, 1.1),
+        "asset_cfg": SceneEntityCfg("robot", body_names=".*"), "mass_distribution_params": (0.98, 1.02),
         "operation": "scale"})
     body_com = EventTerm(func=common_mdp.randomize_rigid_body_com, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-        "com_range": {"x": (-0.005, 0.005), "y": (-0.005, 0.005), "z": (-0.005, 0.005)}})
+        "com_range": {"x": (-0.001, 0.001), "y": (-0.001, 0.001), "z": (-0.001, 0.001)}})
     pd_gains = EventTerm(func=common_mdp.randomize_actuator_gains, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS),
-        "stiffness_distribution_params": (0.9, 1.1),
-        "damping_distribution_params": (0.9, 1.1), "operation": "scale"})
+        "stiffness_distribution_params": (0.98, 1.02),
+        "damping_distribution_params": (0.98, 1.02), "operation": "scale"})
 
 
 @configclass

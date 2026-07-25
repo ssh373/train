@@ -20,6 +20,30 @@ from rsl_rl.algorithms import PPO
 from .symmetry import mirror_actions, mirror_observations
 
 
+_ACTOR_OBSERVATION_SLICES = (
+    ("base_ang_vel", 0, 3),
+    ("projected_gravity", 3, 6),
+    ("joint_pos", 6, 18),
+    ("joint_vel", 18, 30),
+    ("previous_action", 30, 42),
+    ("goal", 42, 46),
+)
+
+
+def _check_actor_observations(observations: torch.Tensor) -> None:
+    """Fail with the names of actor observation terms containing NaN/Inf."""
+    invalid = ~torch.isfinite(observations)
+    if not invalid.any():
+        return
+    invalid_columns = invalid.reshape(-1, observations.shape[-1]).any(dim=0)
+    terms = [name for name, start, end in _ACTOR_OBSERVATION_SLICES if invalid_columns[start:end].any()]
+    columns = torch.where(invalid_columns)[0].tolist()
+    raise FloatingPointError(
+        "GoTo policy observations contain NaN/Inf before the LSTM: "
+        f"term(s)={terms or ['unknown-layout']}, column(s)={columns}."
+    )
+
+
 def _interleave(original: torch.Tensor, mirrored: torch.Tensor) -> torch.Tensor:
     """Return ``[original_0, mirror_0, original_1, mirror_1, ...]``."""
     return torch.stack((original, mirrored), dim=1).flatten(0, 1)
@@ -65,14 +89,32 @@ def _install_positive_std(policy, init_noise_std: float) -> None:
     policy.std.register_hook(sanitize_std_gradient)
 
     def update_distribution_with_positive_std(self, observations):
+        if not torch.isfinite(observations).all():
+            memory_parameters_are_finite = all(
+                torch.isfinite(parameter).all() for parameter in self.memory_a.parameters())
+            hidden_states = self.memory_a.hidden_states
+            if hidden_states is None:
+                memory_state_is_finite = True
+            else:
+                states = hidden_states if isinstance(hidden_states, tuple) else (hidden_states,)
+                memory_state_is_finite = all(torch.isfinite(state).all() for state in states)
+            raise FloatingPointError(
+                "GoTo LSTM produced NaN/Inf actor features: "
+                f"memory_parameters_finite={memory_parameters_are_finite}, "
+                f"hidden_cell_state_finite={memory_state_is_finite}. This is not an std failure."
+            )
         mean = self.actor(observations)
+        if not torch.isfinite(mean).all():
+            actor_parameters_are_finite = all(torch.isfinite(parameter).all() for parameter in self.actor.parameters())
+            source = "finite actor parameters produced overflow" if actor_parameters_are_finite else "actor parameters became NaN/Inf"
+            raise FloatingPointError(f"GoTo actor mean became NaN/Inf: {source}. This is not an std failure.")
         if not torch.isfinite(self.std).all():
             raise FloatingPointError(
                 "GoTo policy raw std became NaN/Inf. Start a fresh run; "
                 "do not resume a checkpoint produced before the std-gradient guard."
             )
         scale = F.softplus(self.std).clamp(min=1.0e-4, max=5.0)
-        self.distribution = Normal(mean, mean * 0.0 + scale)
+        self.distribution = Normal(mean, scale.expand_as(mean))
 
     policy.update_distribution = types.MethodType(update_distribution_with_positive_std, policy)
 
@@ -170,6 +212,7 @@ class RecurrentSymmetryPPO(PPO):
         return _interleave(obs, mirrored)
 
     def act(self, obs, critic_obs):
+        _check_actor_observations(obs)
         actor_obs = self._augment_observations(obs, "policy")
         critic_obs_aug = self._augment_observations(critic_obs, "critic")
         augmented_actions = super().act(actor_obs, critic_obs_aug)
