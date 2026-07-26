@@ -9,6 +9,8 @@ from dataclasses import MISSING
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg, SceneEntityCfg
+from isaaclab.managers.manager_base import ManagerTermBase
+from isaaclab.managers.manager_term_cfg import RewardTermCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import wrap_to_pi
 
@@ -48,7 +50,7 @@ class UniformSE2GoalCommand(CommandTerm):
         return dx, dy, dtheta
 
     def _distance(self, dx, dy, dtheta):
-        return dx.square() + dy.square() + self.cfg.constellation_inertia * 2.0 * (1.0 - torch.cos(dtheta))
+        return dx.square() + dy.square() + 2.0 * self.cfg.constellation_radius**2 * (1.0 - torch.cos(dtheta))
 
     def _update_metrics(self):
         dx, dy, dtheta = self._relative_pose()
@@ -99,7 +101,7 @@ class UniformSE2GoalCommandCfg(CommandTermCfg):
     class_type: type = UniformSE2GoalCommand
     asset_name: str = MISSING
     category_probabilities: tuple[float, float, float, float, float] = (0.10, 0.20, 0.20, 0.20, 0.30)
-    constellation_inertia: float = 1.0
+    constellation_radius: float = 1.0
 
     @configclass
     class Ranges:
@@ -118,10 +120,118 @@ def _term(env, command_name: str) -> UniformSE2GoalCommand:
     return env.command_manager.get_term(command_name)
 
 
-def constellation_reward(env, command_name="pose_goal", weight=0.2, reward_scale=1.0):
+def constellation_reward(env, command_name="pose_goal", radius=1.0):
     term = _term(env, command_name)
     dx, dy, dtheta = term._relative_pose()
-    return reward_scale * torch.exp(-weight * term._distance(dx, dy, dtheta))
+    distance = dx.square() + dy.square() + 2.0 * radius**2 * (1.0 - torch.cos(dtheta))
+    return torch.exp(-0.2 * distance)
+
+
+def standing_mask(env, command_name="pose_goal", position_threshold=0.05, orientation_threshold=0.10):
+    """Shared pose-only standing gate used by paper reward terms."""
+    dx, dy, dtheta = _term(env, command_name)._relative_pose()
+    return (torch.sqrt(dx.square() + dy.square()) < position_threshold) & (torch.abs(dtheta) < orientation_threshold)
+
+
+def base_height_reward(env, nominal_base_height: float, asset_cfg=SceneEntityCfg("robot")):
+    robot = env.scene[asset_cfg.name]
+    return torch.exp(-20.0 * torch.abs(robot.data.root_pos_w[:, 2] - nominal_base_height))
+
+
+def feet_airtime_reward(env, command_name: str, sensor_cfg: SceneEntityCfg):
+    sensor = env.scene.sensors[sensor_cfg.name]
+    touchdown = sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids]
+    last_air_time = sensor.data.last_air_time[:, sensor_cfg.body_ids]
+    walking_reward = torch.sum((last_air_time - 0.4) * touchdown.float(), dim=1)
+    return torch.where(standing_mask(env, command_name), torch.ones_like(walking_reward), walking_reward)
+
+
+def _quat_to_rpy(quat):
+    """Convert Isaac Lab wxyz quaternions to wrapped XYZ Euler angles."""
+    w, x, y, z = quat.unbind(-1)
+    roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x.square() + y.square()))
+    pitch = torch.asin(torch.clamp(2.0 * (w * y - z * x), -1.0, 1.0))
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
+    return roll, pitch, yaw
+
+
+def feet_orientation_reward(env, command_name: str, asset_cfg: SceneEntityCfg):
+    robot = env.scene[asset_cfg.name]
+    roll, pitch, yaw = _quat_to_rpy(robot.data.body_quat_w[:, asset_cfg.body_ids])
+    yaw_error = torch.abs(wrap_to_pi(yaw - robot.data.heading_w[:, None]))
+    error = torch.sum(torch.abs(roll) + torch.abs(pitch), dim=1)
+    turning = torch.abs(_term(env, command_name)._relative_pose()[2]) > 0.10
+    return torch.exp(-error - torch.where(turning, torch.zeros_like(error), torch.sum(yaw_error, dim=1)))
+
+
+def _feet_in_yaw_frame(robot, body_ids):
+    delta = robot.data.body_pos_w[:, body_ids] - robot.data.root_pos_w[:, None, :]
+    yaw = robot.data.heading_w
+    c, s = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
+    return torch.stack((c * delta[..., 0] + s * delta[..., 1], -s * delta[..., 0] + c * delta[..., 1], delta[..., 2]), dim=-1)
+
+
+class feet_position_reward(ManagerTermBase):
+    """Standing foot-position reward with nominal FK cached before reset randomization."""
+
+    def __init__(self, cfg: RewardTermCfg, env):
+        super().__init__(cfg, env)
+        asset_cfg = cfg.params["asset_cfg"]
+        robot = env.scene[asset_cfg.name]
+        # Cache a body-relative value from the spawned nominal K1 pose. This is
+        # morphology-derived and is unaffected by later world/reset poses.
+        self.nominal_foot_pos_b = _feet_in_yaw_frame(robot, asset_cfg.body_ids).detach().clone()
+
+    def __call__(self, env, command_name: str, asset_cfg: SceneEntityCfg):
+        robot = env.scene[asset_cfg.name]
+        current = _feet_in_yaw_frame(robot, asset_cfg.body_ids)
+        error = torch.sum(torch.abs(current - self.nominal_foot_pos_b), dim=(1, 2))
+        standing_reward = torch.exp(-3.0 * error)
+        return torch.where(standing_mask(env, command_name), standing_reward, torch.ones_like(error))
+
+
+def base_acceleration_reward(env, asset_cfg=SceneEntityCfg("robot")):
+    robot = env.scene[asset_cfg.name]
+    velocity = robot.data.root_lin_vel_w
+    if not hasattr(env, "_goto_previous_root_lin_vel_w"):
+        env._goto_previous_root_lin_vel_w = velocity.detach().clone()
+    reset = env.episode_length_buf <= 1
+    acceleration = (velocity - env._goto_previous_root_lin_vel_w) / env.step_dt
+    acceleration[reset] = 0.0
+    env._goto_previous_root_lin_vel_w.copy_(velocity)
+    return torch.exp(-0.01 * torch.sum(torch.abs(acceleration), dim=1))
+
+
+def action_difference_reward(env):
+    action = env.action_manager.action
+    previous = env.action_manager.prev_action
+    return torch.exp(-0.02 * torch.sum(torch.abs(action - previous), dim=1))
+
+
+def normalized_torque_reward(env, asset_cfg=SceneEntityCfg("robot")):
+    robot = env.scene[asset_cfg.name]
+    torque = torch.abs(robot.data.applied_torque[:, asset_cfg.joint_ids])
+    if hasattr(robot.data, "soft_joint_effort_limits"):
+        limits = robot.data.soft_joint_effort_limits[:, asset_cfg.joint_ids]
+    elif hasattr(robot.data, "joint_effort_limits"):
+        limits = robot.data.joint_effort_limits[:, asset_cfg.joint_ids]
+    else:
+        raise AttributeError("K1 articulation data exposes no per-joint effort limits")
+    return torch.exp(-0.02 * torch.mean(torque / torch.clamp(limits, min=1.0e-6), dim=1))
+
+
+def tilt_safety(env, safe_tilt=math.radians(20.0), termination_tilt=math.radians(60.0), asset_cfg=SceneEntityCfg("robot")):
+    quat = env.scene[asset_cfg.name].data.root_quat_w
+    body_up_dot = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
+    tilt = torch.acos(torch.clamp(body_up_dot, -1.0, 1.0))
+    violation = torch.clamp((tilt - safe_tilt) / (termination_tilt - safe_tilt), 0.0, 1.0)
+    return violation.square()
+
+
+def excessive_tilt(env, termination_tilt=math.radians(60.0), asset_cfg=SceneEntityCfg("robot")):
+    quat = env.scene[asset_cfg.name].data.root_quat_w
+    body_up_dot = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
+    return torch.acos(torch.clamp(body_up_dot, -1.0, 1.0)) >= termination_tilt
 
 
 def goal_progress(env, command_name="pose_goal"):

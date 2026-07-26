@@ -24,7 +24,7 @@ from booster_train.tasks.manager_based.locomotion.goto import mdp
 
 LEGS = [".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"]
 FEET = ["left_foot_link", "right_foot_link"]
-NOMINAL_BASE_HEIGHT = 0.57  # Confirmed by the existing K1 locomotion task/asset configuration.
+NOMINAL_BASE_HEIGHT = float(BOOSTER_K1_CFG.init_state.pos[2])
 
 
 class VisualizedSE2GoalCommand(mdp.UniformSE2GoalCommand):
@@ -77,7 +77,7 @@ class VisualizedSE2GoalCommand(mdp.UniformSE2GoalCommand):
             (x + radius * torch.cos(yaw), y + radius * torch.sin(yaw), torch.full_like(x, z)), dim=-1)
 
     def _debug_vis_callback(self, event):
-        radius = math.sqrt(float(self.cfg.constellation_inertia))
+        radius = float(self.cfg.constellation_radius)
         robot_pos = self.robot.data.root_pos_w
         robot_yaw = self.robot.data.heading_w
         goal = self.goal_pose_w
@@ -114,7 +114,7 @@ class CommandsCfg:
         category_probabilities=(0.10, 0.20, 0.20, 0.20, 0.30),
         ranges=mdp.UniformSE2GoalCommandCfg.Ranges(
             delta_x=(-2.0, 2.0), delta_y=(-1.5, 1.5), delta_yaw=(-math.pi, math.pi)),
-        constellation_inertia=1.0, debug_vis=False,
+        constellation_radius=1.0, debug_vis=False,
     )
 
 
@@ -162,37 +162,21 @@ class ObservationsCfg:
 @configclass
 class RewardsCfg:
     constellation = RewTerm(func=mdp.constellation_reward, weight=1.0, params={
-        "command_name": "pose_goal", "weight": 0.2, "reward_scale": 1.0})
-    progress = RewTerm(func=mdp.goal_progress, weight=2.0, params={"command_name": "pose_goal"})
-    success = RewTerm(func=mdp.goal_success, weight=2.0, params={
+        "command_name": "pose_goal", "radius": 1.0})
+    base_height = RewTerm(func=mdp.base_height_reward, weight=0.05, params={
+        "nominal_base_height": NOMINAL_BASE_HEIGHT})
+    feet_airtime = RewTerm(func=mdp.feet_airtime_reward, weight=1.0, params={
         "command_name": "pose_goal", "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET)})
-    upright = RewTerm(func=common_mdp.flat_orientation_l2, weight=-1.0)
-    vertical_velocity = RewTerm(func=common_mdp.lin_vel_z_l2, weight=-0.5)
-    roll_pitch_rate = RewTerm(func=common_mdp.ang_vel_xy_l2, weight=-0.05)
-    action_rate = RewTerm(func=common_mdp.action_rate_l2, weight=-0.01)
-    joint_velocity = RewTerm(func=common_mdp.joint_vel_l2, weight=-1.0e-4)
-    joint_acceleration = RewTerm(func=common_mdp.joint_acc_l2, weight=-2.5e-7)
-    torque = RewTerm(func=common_mdp.joint_torques_l2, weight=-1.0e-5)
-    mechanical_power = RewTerm(func=mdp.mechanical_power_l1, weight=-2.0e-5)
+    feet_orientation = RewTerm(func=mdp.feet_orientation_reward, weight=0.05, params={
+        "command_name": "pose_goal", "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    feet_position = RewTerm(func=mdp.feet_position_reward, weight=0.05, params={
+        "command_name": "pose_goal", "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    base_acceleration = RewTerm(func=mdp.base_acceleration_reward, weight=0.10)
+    action_difference = RewTerm(func=mdp.action_difference_reward, weight=0.02)
+    normalized_torque = RewTerm(func=mdp.normalized_torque_reward, weight=0.02, params={
+        "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
     joint_limits = RewTerm(func=common_mdp.joint_pos_limits, weight=-2.0)
-    nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.03,
-                           params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
-    foot_slip = RewTerm(func=common_mdp.feet_slide, weight=-0.1, params={
-        "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
-    foot_spacing = RewTerm(func=mdp.feet_lateral_spacing_l2, weight=-2.0, params={
-        "target_spacing": 0.20,
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
-    foot_crossing = RewTerm(func=mdp.feet_crossing_penalty, weight=-10.0, params={
-        "minimum_spacing": 0.15,
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
-    foot_clearance = RewTerm(func=common_mdp.foot_clearance_reward, weight=0.15, params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
-        "target_height": 0.045, "std": 0.02, "tanh_mult": 2.0})
-    contact_symmetry = RewTerm(func=common_mdp.gait_contact_symmetry_penalty, weight=-0.05, params={
-        "command_name": "pose_goal",
-        "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
-        "vel_threshold": 0.10})
+    tilt_safety = RewTerm(func=mdp.tilt_safety, weight=-0.05)
     undesired_contact = RewTerm(func=common_mdp.undesired_contacts, weight=-1.0, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[r"^(?!left_foot_link$)(?!right_foot_link$).+$"]),
         "threshold": 1.0})
@@ -202,9 +186,12 @@ class RewardsCfg:
 class TerminationsCfg:
     time_out = DoneTerm(func=common_mdp.time_out, time_out=True)
     fall_height = DoneTerm(func=mdp.base_height_below_ratio, params={
-        "nominal_height": NOMINAL_BASE_HEIGHT, "fall_height_ratio": 0.60})
+        # Paper threshold retained explicitly; the nominal height still comes
+        # from the K1 asset and is not duplicated in reward/config code.
+        "nominal_height": NOMINAL_BASE_HEIGHT, "fall_height_ratio": 0.40 / NOMINAL_BASE_HEIGHT})
     trunk_contact = DoneTerm(func=common_mdp.illegal_contact, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names="Trunk"), "threshold": 1.0})
+    excessive_tilt = DoneTerm(func=mdp.excessive_tilt)
 
 
 @configclass
@@ -212,14 +199,13 @@ class EventsCfg:
     reset_base = EventTerm(func=common_mdp.reset_root_state_uniform, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"),
         "pose_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2),
-                       "roll": (-0.06, 0.06), "pitch": (-0.08, 0.08),
+                       "roll": (0.0, 0.0), "pitch": (0.0, 0.0),
                        "yaw": (-math.pi, math.pi)},
-        "velocity_range": {"x": (-0.25, 0.25), "y": (-0.20, 0.20), "z": (-0.05, 0.05),
-                           "roll": (-0.40, 0.40), "pitch": (-0.50, 0.50),
-                           "yaw": (-0.30, 0.30)}})
+        "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
+                           "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)}})
     reset_joints = EventTerm(func=common_mdp.reset_joints_by_offset, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.08, 0.08),
-        "velocity_range": (-0.35, 0.35)})
+        "velocity_range": (0.0, 0.0)})
     recovery_push = EventTerm(func=common_mdp.push_by_setting_velocity, mode="interval",
                               interval_range_s=(3.0, 6.0), params={
         "asset_cfg": SceneEntityCfg("robot"),
@@ -252,9 +238,6 @@ class EventsCfg:
 class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
     # Paper defaults. Keep configurable: K1 morphology may require retuning.
     constellation_radius: float = 1.0
-    constellation_inertia: float = 1.0
-    constellation_reward_scale: float = 1.0
-    constellation_reward_weight: float = 0.2
     scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=5.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -265,17 +248,18 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 4
-        self.episode_length_s = 30.0
+        self.episode_length_s = 8.0
         self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
         self.scene.contact_forces.update_period = self.sim.dt
         self.actions.joint_pos.scale = {k: v for k, v in K1_ACTION_SCALE.items()
                                         if any(token in k for token in ("Hip", "Knee", "Ankle"))}
         # Keep paper parameters synchronized with the command/reward implementations.
-        self.commands.pose_goal.constellation_inertia = self.constellation_inertia
-        self.rewards.constellation.params.update(
-            weight=self.constellation_reward_weight,
-            reward_scale=self.constellation_reward_scale)
+        self.commands.pose_goal.constellation_radius = self.constellation_radius
+        self.rewards.constellation.params["radius"] = self.constellation_radius
+        # Strict paper task: disturbances belong only to robust/sim-to-real variants.
+        self.events.recovery_push = None
+        self.events.sustained_push = None
 
 
 @configclass
@@ -289,6 +273,9 @@ class K1GoToSmokeEnvCfg(K1GoToEnvCfg):
 class K1GoToSim2RealEnvCfg(K1GoToEnvCfg):
     def __post_init__(self):
         super().__post_init__()
+        robust_events = EventsCfg()
+        self.events.recovery_push = robust_events.recovery_push
+        self.events.sustained_push = robust_events.sustained_push
         self.events.friction.params.update(static_friction_range=(0.6, 1.3), dynamic_friction_range=(0.5, 1.2))
         self.events.body_mass.params["mass_distribution_params"] = (0.85, 1.15)
         self.events.body_com.params["com_range"] = {

@@ -22,8 +22,45 @@ def world_to_body_goal(robot: tuple[float, float, float], goal: tuple[float, flo
     return c * dx + s * dy, -s * dx + c * dy, wrap_to_pi(goal[2] - robot[2])
 
 
-def constellation_distance(dx: float, dy: float, dtheta: float, inertia: float = 1.0) -> float:
-    return dx * dx + dy * dy + inertia * 2.0 * (1.0 - math.cos(dtheta))
+def constellation_distance(dx: float, dy: float, dtheta: float, radius: float = 1.0) -> float:
+    """Squared SE(2) constellation distance; inertia is derived as ``radius**2``."""
+    return dx * dx + dy * dy + 2.0 * radius * radius * (1.0 - math.cos(dtheta))
+
+
+def constellation_reward(dx: float, dy: float, dtheta: float, radius: float = 1.0) -> float:
+    return math.exp(-0.2 * constellation_distance(dx, dy, dtheta, radius))
+
+
+def standing_mask(position_error: float, orientation_error: float) -> bool:
+    return position_error < 0.05 and abs(orientation_error) < 0.10
+
+
+def base_height_reward(base_z: float, nominal_base_height: float) -> float:
+    return math.exp(-20.0 * abs(base_z - nominal_base_height))
+
+
+def feet_airtime_reward(is_standing: bool, last_air_times: tuple[float, ...], touchdowns: tuple[bool, ...]) -> float:
+    if is_standing:
+        return 1.0
+    return sum((air_time - 0.4) * touchdown for air_time, touchdown in zip(last_air_times, touchdowns))
+
+
+def action_difference_reward(action: tuple[float, ...], previous_action: tuple[float, ...]) -> float:
+    return math.exp(-0.02 * sum(abs(a - b) for a, b in zip(action, previous_action)))
+
+
+def normalized_torque_reward(normalized_torques: tuple[float, ...]) -> float:
+    mean = sum(abs(value) for value in normalized_torques) / max(len(normalized_torques), 1)
+    return math.exp(-0.02 * mean)
+
+
+def joint_limit_cost(position: tuple[float, ...], lower: tuple[float, ...], upper: tuple[float, ...]) -> float:
+    return sum(max(lo - q, 0.0) + max(q - hi, 0.0) for q, lo, hi in zip(position, lower, upper))
+
+
+def tilt_safety_cost(tilt_angle: float, safe_tilt: float = math.radians(20.0), termination_tilt: float = math.radians(60.0)) -> float:
+    violation = min(max((tilt_angle - safe_tilt) / (termination_tilt - safe_tilt), 0.0), 1.0)
+    return violation * violation
 
 
 def explicit_constellation_distance(dx: float, dy: float, dtheta: float, radius: float = 1.0) -> float:
