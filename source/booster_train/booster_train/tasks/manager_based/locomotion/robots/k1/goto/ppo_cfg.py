@@ -15,6 +15,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 200
     experiment_name = "k1_goto"
     empirical_normalization = True
+    clip_actions = 1.0
     logger = "tensorboard"
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,

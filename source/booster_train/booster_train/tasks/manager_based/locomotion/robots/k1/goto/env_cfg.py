@@ -181,7 +181,7 @@ class RewardsCfg:
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
     foot_spacing = RewTerm(func=mdp.feet_lateral_spacing_l2, weight=-2.0, params={
-        "target_spacing": 0.30,
+        "target_spacing": 0.20,
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
     foot_crossing = RewTerm(func=mdp.feet_crossing_penalty, weight=-10.0, params={
         "minimum_spacing": 0.15,
