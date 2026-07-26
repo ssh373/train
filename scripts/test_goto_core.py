@@ -71,7 +71,7 @@ class GoToCoreTests(unittest.TestCase):
         self.assertGreater(core.tilt_safety_cost(math.radians(40.0)), 0.0)
         self.assertEqual(core.tilt_safety_cost(math.radians(60.0)), 1.0)
 
-    def test_strict_config_has_exact_reward_set_and_no_push(self):
+    def test_config_has_restored_stabilization_rewards_and_no_push(self):
         env_cfg = MODULE.parents[1] / "robots/k1/goto/env_cfg.py"
         tree = ast.parse(env_cfg.read_text(encoding="utf-8"))
         classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
@@ -80,9 +80,9 @@ class GoToCoreTests(unittest.TestCase):
             if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
         }
         self.assertEqual(rewards, {
-            "constellation", "base_height", "feet_airtime", "feet_orientation", "feet_position",
-            "base_acceleration", "action_difference", "normalized_torque", "joint_limits",
-            "tilt_safety", "undesired_contact",
+            "constellation", "progress", "success", "upright", "vertical_velocity",
+            "roll_pitch_rate", "action_rate", "joint_velocity", "joint_acceleration", "torque",
+            "mechanical_power", "joint_limits", "nominal_pose", "foot_slip", "undesired_contact",
         })
         source = env_cfg.read_text(encoding="utf-8")
         self.assertIn("self.events.recovery_push = None", source)

@@ -11,6 +11,7 @@ def _register(task_id: str, env_cfg: str, agent_cfg: str = "PPORunnerCfg"):
         kwargs={
             "env_cfg_entry_point": f"{__name__}.env_cfg:{env_cfg}",
             "rsl_rl_cfg_entry_point": f"{__name__}.ppo_cfg:{agent_cfg}",
+            "legacy_rsl_rl_cfg_entry_point": f"{__name__}.legacy_ppo_cfg:LegacyPPORunnerCfg",
         },
     )
 

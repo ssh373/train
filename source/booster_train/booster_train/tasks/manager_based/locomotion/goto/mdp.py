@@ -220,7 +220,7 @@ def normalized_torque_reward(env, asset_cfg=SceneEntityCfg("robot")):
     return torch.exp(-0.02 * torch.mean(torque / torch.clamp(limits, min=1.0e-6), dim=1))
 
 
-def tilt_safety(env, safe_tilt=math.radians(20.0), termination_tilt=math.radians(60.0), asset_cfg=SceneEntityCfg("robot")):
+def tilt_safety(env, safe_tilt=math.radians(5.0), termination_tilt=math.radians(60.0), asset_cfg=SceneEntityCfg("robot")):
     quat = env.scene[asset_cfg.name].data.root_quat_w
     body_up_dot = 1.0 - 2.0 * (quat[:, 1].square() + quat[:, 2].square())
     tilt = torch.acos(torch.clamp(body_up_dot, -1.0, 1.0))
