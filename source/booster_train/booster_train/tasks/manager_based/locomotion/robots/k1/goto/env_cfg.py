@@ -110,7 +110,7 @@ class SceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     pose_goal = mdp.UniformSE2GoalCommandCfg(
         class_type=mdp.UniformSE2GoalCommand,
-        asset_name="robot", resampling_time_range=(4.0, 8.0),
+        asset_name="robot", resampling_time_range=(2.0, 6.0),
         category_probabilities=(0.10, 0.20, 0.20, 0.20, 0.30),
         ranges=mdp.UniformSE2GoalCommandCfg.Ranges(
             delta_x=(-2.0, 2.0), delta_y=(-1.5, 1.5), delta_yaw=(-math.pi, math.pi)),
@@ -196,19 +196,18 @@ class TerminationsCfg:
 
 @configclass
 class EventsCfg:
-    # These were explicitly disabled in the reference run.
-    trunk_com = None
-    pd_gains = None
     reset_base = EventTerm(func=common_mdp.reset_root_state_uniform, mode="reset", params={
         "asset_cfg": SceneEntityCfg("robot"),
-        "pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)},
+        "pose_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2),
+                       "roll": (0.0, 0.0), "pitch": (0.0, 0.0),
+                       "yaw": (-math.pi, math.pi)},
         "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
                            "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)}})
     reset_joints = EventTerm(func=common_mdp.reset_joints_by_offset, mode="reset", params={
-        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.05, 0.05),
+        "asset_cfg": SceneEntityCfg("robot"), "position_range": (-0.08, 0.08),
         "velocity_range": (0.0, 0.0)})
     recovery_push = EventTerm(func=common_mdp.push_by_setting_velocity, mode="interval",
-                              interval_range_s=(3.0, 6.0), params={
+                              interval_range_s=(6.0, 10.0), params={
         "asset_cfg": SceneEntityCfg("robot"),
         "velocity_range": {"x": (-0.35, 0.35), "y": (-0.30, 0.30),
                            "roll": (-0.25, 0.25), "pitch": (-0.30, 0.30),
@@ -216,16 +215,23 @@ class EventsCfg:
     sustained_push = EventTerm(func=mdp.sustained_random_push, mode="interval",
                                interval_range_s=(0.02, 0.02), params={
         "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-        "push_interval_s": 5.0,
-        "push_duration_s": 1.0,
-        "force_magnitude_range": (5.0, 15.0),
+        "push_interval_s": 10.0,
+        "push_duration_s": 0.5,
+        "force_magnitude_range": (5.0, 12.0),
         "torque_range": (-1.0, 1.0)})
     friction = EventTerm(func=common_mdp.randomize_rigid_body_material, mode="startup", params={
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET), "static_friction_range": (0.8, 1.2),
         "dynamic_friction_range": (0.7, 1.1), "restitution_range": (0.0, 0.0), "num_buckets": 32})
-    trunk_mass = EventTerm(func=common_mdp.randomize_rigid_body_mass, mode="startup", params={
-        "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-        "mass_distribution_params": (-0.5, 0.5), "operation": "add"})
+    body_mass = EventTerm(func=common_mdp.randomize_rigid_body_mass, mode="startup", params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+        "mass_distribution_params": (0.9, 1.1), "operation": "scale"})
+    body_com = EventTerm(func=common_mdp.randomize_rigid_body_com, mode="startup", params={
+        "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+        "com_range": {"x": (-0.005, 0.005), "y": (-0.005, 0.005), "z": (-0.005, 0.005)}})
+    pd_gains = EventTerm(func=common_mdp.randomize_actuator_gains, mode="reset", params={
+        "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS),
+        "stiffness_distribution_params": (0.9, 1.1),
+        "damping_distribution_params": (0.9, 1.1), "operation": "scale"})
 
 
 @configclass
@@ -242,7 +248,7 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 4
-        self.episode_length_s = 8.0
+        self.episode_length_s = 30.0
         self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
         self.scene.contact_forces.update_period = self.sim.dt
@@ -251,9 +257,6 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
         # Keep paper parameters synchronized with the command/reward implementations.
         self.commands.pose_goal.constellation_radius = self.constellation_radius
         self.rewards.constellation.params["radius"] = self.constellation_radius
-        # Strict paper task: disturbances belong only to robust/sim-to-real variants.
-        self.events.recovery_push = None
-        self.events.sustained_push = None
 
 
 @configclass
@@ -271,7 +274,9 @@ class K1GoToSim2RealEnvCfg(K1GoToEnvCfg):
         self.events.recovery_push = robust_events.recovery_push
         self.events.sustained_push = robust_events.sustained_push
         self.events.friction.params.update(static_friction_range=(0.6, 1.3), dynamic_friction_range=(0.5, 1.2))
-        self.events.trunk_mass.params["mass_distribution_params"] = (-0.75, 0.75)
+        self.events.body_mass.params["mass_distribution_params"] = (0.85, 1.15)
+        self.events.body_com.params["com_range"] = {
+            "x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.005, 0.005)}
 
 
 @configclass
@@ -280,8 +285,8 @@ class K1GoToPlayEnvCfg(K1GoToEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 16
         self.events.friction = None
-        self.events.trunk_mass = None
-        self.events.trunk_com = None
+        self.events.body_mass = None
+        self.events.body_com = None
         self.events.pd_gains = None
         self.events.recovery_push = None
         self.events.sustained_push = None
