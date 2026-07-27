@@ -38,6 +38,15 @@ python scripts/list_envs.py
 python scripts/rsl_rl/train.py --task Booster-K1-GoTo-Smoke-v0 --headless --max_iterations 5
 python scripts/rsl_rl/train.py --task Booster-K1-GoTo-v0 --headless
 python scripts/rsl_rl/play.py --task Booster-K1-GoTo-v0-Play --checkpoint <checkpoint>
+python scripts/rsl_rl/play.py --task Booster-K1-GoTo-AStar-v0-Play --checkpoint <checkpoint> --num_envs 1
+python scripts/rsl_rl/train.py --task Booster-K1-GoTo-Dynamic-v0 --headless
+python scripts/rsl_rl/play.py --task Booster-K1-GoTo-Dynamic-v0-Play --checkpoint <checkpoint> --num_envs 1
+
+# Dynamic curriculum (30K):
+#   0-5K:   static/moving/A* = 70/20/10, no jitter
+#   5-12K:  40/35/25, moving goals up to 0.6 m/s, 1 cm jitter
+#   12-22K: 20/45/35, moving goals up to 1.0 m/s, realistic A* replans
+#   22-30K: 10/55/35, moving goals up to 1.5 m/s, rare one-frame flicker
 python scripts/rsl_rl/evaluate_goto.py --checkpoint <checkpoint> --headless --output goto_eval.csv
 python scripts/rsl_rl/play.py --task Booster-K1-GoTo-v0-Play --checkpoint <checkpoint> --headless
 ```

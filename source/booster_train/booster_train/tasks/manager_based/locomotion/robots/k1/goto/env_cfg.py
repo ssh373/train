@@ -11,12 +11,14 @@ from isaaclab.managers import (
     EventTermCfg as EventTerm, ObservationGroupCfg as ObsGroup, ObservationTermCfg as ObsTerm,
     RewardTermCfg as RewTerm, SceneEntityCfg, TerminationTermCfg as DoneTerm,
 )
+from isaaclab.managers.manager_base import ManagerTermBase
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.math import wrap_to_pi as lab_wrap_to_pi
 
 from booster_train.assets.robots.booster import BOOSTER_K1_CFG, K1_ACTION_SCALE
 from booster_train.tasks.manager_based.locomotion import mdp as common_mdp
@@ -25,6 +27,75 @@ from booster_train.tasks.manager_based.locomotion.goto import mdp
 LEGS = [".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"]
 FEET = ["left_foot_link", "right_foot_link"]
 NOMINAL_BASE_HEIGHT = float(BOOSTER_K1_CFG.init_state.pos[2])
+
+
+class NearGoalFootSpacingPenalty(ManagerTermBase):
+    """Penalize only excessive lateral foot spacing after reaching the pose goal."""
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        asset_cfg = cfg.params["asset_cfg"]
+        robot = env.scene[asset_cfg.name]
+        self.nominal_spacing = self._spacing(robot, asset_cfg.body_ids).detach().clone()
+
+    @staticmethod
+    def _spacing(robot, body_ids):
+        feet_delta_w = robot.data.body_pos_w[:, body_ids[0], :2] - robot.data.body_pos_w[:, body_ids[1], :2]
+        yaw = robot.data.heading_w
+        lateral_delta = -torch.sin(yaw) * feet_delta_w[:, 0] + torch.cos(yaw) * feet_delta_w[:, 1]
+        return torch.abs(lateral_delta)
+
+    def __call__(
+        self,
+        env,
+        command_name: str,
+        asset_cfg: SceneEntityCfg,
+        max_extra_spacing: float,
+        penalty_scale: float,
+        position_threshold: float,
+        orientation_threshold: float,
+    ):
+        robot = env.scene[asset_cfg.name]
+        spacing = self._spacing(robot, asset_cfg.body_ids)
+        excess = torch.clamp(spacing - (self.nominal_spacing + max_extra_spacing), min=0.0)
+        penalty = torch.square(excess / penalty_scale)
+        near_goal = mdp.standing_mask(
+            env,
+            command_name,
+            position_threshold=position_threshold,
+            orientation_threshold=orientation_threshold,
+        )
+        return torch.where(near_goal, penalty, torch.zeros_like(penalty))
+
+
+class NearStableGoalStandPosturePenalty(ManagerTermBase):
+    """Return the legs smoothly to their default pose near a stable goal."""
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        asset_cfg = cfg.params["asset_cfg"]
+        self.robot = env.scene[asset_cfg.name]
+        self.joint_ids = asset_cfg.joint_ids
+
+    def __call__(self, env, command_name: str, asset_cfg: SceneEntityCfg,
+                 enter_radius: float, full_radius: float, max_goal_speed: float):
+        term = env.command_manager.get_term(command_name)
+        dx, dy, _ = term._relative_pose()
+        distance = torch.sqrt(dx.square() + dy.square())
+        blend = torch.clamp(
+            (enter_radius - distance) / max(enter_radius - full_radius, 1.0e-6), 0.0, 1.0
+        )
+        blend = blend.square() * (3.0 - 2.0 * blend)
+        target_speed = getattr(term, "target_motion_speed", torch.zeros_like(distance))
+        stable = (target_speed < max_goal_speed).float()
+        posture_error = torch.sum(
+            torch.square(
+                self.robot.data.joint_pos[:, self.joint_ids]
+                - self.robot.data.default_joint_pos[:, self.joint_ids]
+            ),
+            dim=1,
+        )
+        return blend * stable * posture_error
 
 
 class VisualizedSE2GoalCommand(mdp.UniformSE2GoalCommand):
@@ -89,6 +160,93 @@ class VisualizedSE2GoalCommand(mdp.UniformSE2GoalCommand):
             robot_pos[:, 0], robot_pos[:, 1], robot_yaw, radius))
         self.goal_heading_visualizer.visualize(self._heading_points(
             goal[:, 0], goal[:, 1], goal[:, 2], radius))
+
+
+class AStarLikeSE2GoalCommand(VisualizedSE2GoalCommand):
+    """Play-only stream of correlated, noisy look-ahead waypoints.
+
+    This is deliberately not part of training.  It approximates the command
+    pattern produced by a local A* planner: nearby waypoints progress along a
+    route, occasional replans change direction sharply, and the perceived goal
+    has small low-rate localization/planner jitter.  Only the command buffer is
+    perturbed; the nominal world-frame waypoint remains fixed between events.
+    """
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        self.route_heading_w = self.robot.data.heading_w.clone()
+        self.goal_jitter_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.jitter_counter = 0
+
+    def _resample_command(self, env_ids):
+        ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if ids.numel() == 0:
+            return
+
+        n = ids.numel()
+        # Most updates are gentle path bends.  A minority mimic an obstacle
+        # appearing and forcing A* to choose a substantially different branch.
+        turn = torch.empty(n, device=self.device).uniform_(-math.radians(22.0), math.radians(22.0))
+        sharp = torch.rand(n, device=self.device) < 0.12
+        sharp_turn = torch.empty(n, device=self.device).uniform_(-math.radians(80.0), math.radians(80.0))
+        turn = torch.where(sharp, sharp_turn, turn)
+        self.route_heading_w[ids] = lab_wrap_to_pi(self.route_heading_w[ids] + turn)
+
+        distance = torch.empty(n, device=self.device).uniform_(0.45, 0.90)
+        heading = self.route_heading_w[ids]
+        self.goal_pose_w[ids, 0] = self.robot.data.root_pos_w[ids, 0] + distance * torch.cos(heading)
+        self.goal_pose_w[ids, 1] = self.robot.data.root_pos_w[ids, 1] + distance * torch.sin(heading)
+        self.goal_pose_w[ids, 2] = heading
+        self.category[ids] = 4  # combined translation + heading
+        self.just_resampled[ids] = True
+
+    def _update_command(self):
+        super()._update_command()
+        # A real local planner normally advances to the next waypoint after the
+        # current one is reached.  Do not keep placing a fresh point in front of
+        # a robot that has not had time to reach the previous one.
+        reached = torch.linalg.vector_norm(self.goal_b[:, :2], dim=1) < 0.20
+        self.time_left[reached] = 0.0
+
+        # Refresh at 10 Hz for the 50 Hz GoTo policy.  The clamp prevents a
+        # single noisy sample from becoming a fake replan event.
+        if self.jitter_counter % 5 == 0:
+            self.goal_jitter_b[:, :2] = torch.randn_like(self.goal_jitter_b[:, :2]).clamp_(-2.5, 2.5) * 0.02
+            self.goal_jitter_b[:, 2] = torch.randn_like(self.goal_jitter_b[:, 2]).clamp_(-3.0, 3.0) * math.radians(2.0)
+        self.jitter_counter += 1
+
+        self.goal_b[:, :2] += self.goal_jitter_b[:, :2]
+        noisy_heading = torch.atan2(self.goal_b[:, 2], self.goal_b[:, 3]) + self.goal_jitter_b[:, 2]
+        self.goal_b[:, 2] = torch.sin(noisy_heading)
+        self.goal_b[:, 3] = torch.cos(noisy_heading)
+
+
+class VisualizedMixedDynamicSE2GoalCommand(mdp.MixedDynamicSE2GoalCommand):
+    """Dynamic training command with GoTo markers and speed telemetry."""
+
+    _set_debug_vis_impl = VisualizedSE2GoalCommand._set_debug_vis_impl
+    _constellation_points = staticmethod(VisualizedSE2GoalCommand._constellation_points)
+    _heading_points = staticmethod(VisualizedSE2GoalCommand._heading_points)
+
+    def _curriculum_stage(self) -> int:
+        # A fresh play environment starts at step zero; force the final training
+        # distribution so the 1.5 m/s target regime is actually evaluated.
+        return 3
+
+    def _debug_vis_callback(self, event):
+        VisualizedSE2GoalCommand._debug_vis_callback(self, event)
+        if self._dynamic_update_counter % 25 != 0 or self.num_envs == 0:
+            return
+        mode_names = ("static", "moving", "astar")
+        mode = mode_names[int(self.goal_mode[0].item())]
+        target_speed = float(self.target_motion_speed[0].item())
+        robot_speed = float(torch.linalg.vector_norm(self.robot.data.root_lin_vel_b[0, :2]).item())
+        goal_distance = float(torch.linalg.vector_norm(self.goal_b[0, :2]).item())
+        print(
+            f"[DynamicGoTo env0] mode={mode} target_speed={target_speed:.3f}m/s "
+            f"robot_speed={robot_speed:.3f}m/s goal_distance={goal_distance:.3f}m",
+            flush=True,
+        )
 
 
 @configclass
@@ -173,10 +331,26 @@ class RewardsCfg:
     joint_velocity = RewTerm(func=common_mdp.joint_vel_l2, weight=-1.0e-4)
     joint_acceleration = RewTerm(func=common_mdp.joint_acc_l2, weight=-2.5e-7)
     torque = RewTerm(func=common_mdp.joint_torques_l2, weight=-1.0e-5)
-    mechanical_power = RewTerm(func=mdp.mechanical_power_l1, weight=-2.0e-5)
     joint_limits = RewTerm(func=common_mdp.joint_pos_limits, weight=-2.0)
     nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.03,
                            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
+    near_goal_foot_spacing = RewTerm(func=NearGoalFootSpacingPenalty, weight=-0.2, params={
+        "command_name": "pose_goal",
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
+        "max_extra_spacing": 0.04,
+        "penalty_scale": 0.05,
+        "position_threshold": 0.10,
+        "orientation_threshold": 0.15,
+    })
+    near_stable_goal_stand_posture = RewTerm(
+        func=NearStableGoalStandPosturePenalty, weight=0.0, params={
+            "command_name": "pose_goal",
+            "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS),
+            "enter_radius": 0.30,
+            "full_radius": 0.10,
+            "max_goal_speed": 0.05,
+        },
+    )
     foot_slip = RewTerm(func=common_mdp.feet_slide, weight=-0.1, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
@@ -292,4 +466,57 @@ class K1GoToPlayEnvCfg(K1GoToEnvCfg):
         self.events.sustained_push = None
         self.observations.policy.enable_corruption = False
         self.commands.pose_goal.class_type = VisualizedSE2GoalCommand
+        self.commands.pose_goal.debug_vis = True
+
+
+@configclass
+class K1GoToAStarPlayEnvCfg(K1GoToPlayEnvCfg):
+    """Play scene that stress-tests a trained GoTo policy with A*-like goals."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.pose_goal.class_type = AStarLikeSE2GoalCommand
+        # Match INHA's 1.5 s path hold. Reaching 0.20 m requests the next point
+        # earlier; this interval is the replan timeout, not a forced fast switch.
+        self.commands.pose_goal.resampling_time_range = (1.5, 2.5)
+
+
+@configclass
+class K1GoToDynamicEnvCfg(K1GoToEnvCfg):
+    """Feed-forward task for changing BT/A* pose targets."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.pose_goal.class_type = mdp.MixedDynamicSE2GoalCommand
+        self.rewards.near_stable_goal_stand_posture.weight = -0.5
+        self.episode_length_s = 30.0
+
+        # Match the benign randomization profile of the best historical 30K run.
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0), "y": (0.0, 0.0), "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
+        }
+        self.events.reset_joints.params["position_range"] = (-0.05, 0.05)
+        self.events.recovery_push = None
+        self.events.sustained_push = None
+        self.events.body_com = None
+        self.events.pd_gains = None
+        self.events.body_mass.params.update({
+            "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
+            "mass_distribution_params": (-0.5, 0.5),
+            "operation": "add",
+        })
+
+
+@configclass
+class K1GoToDynamicPlayEnvCfg(K1GoToDynamicEnvCfg):
+    """Deterministic visualization of the dynamic-goal training distribution."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.events.friction = None
+        self.events.body_mass = None
+        self.observations.policy.enable_corruption = False
+        self.commands.pose_goal.class_type = VisualizedMixedDynamicSE2GoalCommand
         self.commands.pose_goal.debug_vis = True

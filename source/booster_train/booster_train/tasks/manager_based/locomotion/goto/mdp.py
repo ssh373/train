@@ -96,6 +96,151 @@ class UniformSE2GoalCommand(CommandTerm):
         self.goal_b[:, 3] = torch.cos(dtheta)
 
 
+class MixedDynamicSE2GoalCommand(UniformSE2GoalCommand):
+    """Static, moving, and A*-style goals with the original policy interface."""
+
+    STATIC = 0
+    MOVING = 1
+    WAYPOINT = 2
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        self.goal_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.goal_velocity_w = torch.zeros(self.num_envs, 2, device=self.device)
+        self.goal_yaw_rate = torch.zeros(self.num_envs, device=self.device)
+        self.route_heading_w = self.robot.data.heading_w.clone()
+        self.goal_jitter_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.target_motion_speed = torch.zeros(self.num_envs, device=self.device)
+        self.command_settle_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._dynamic_update_counter = 0
+        self.metrics["curriculum_stage"] = torch.zeros(self.num_envs, device=self.device)
+
+    def _curriculum_stage(self) -> int:
+        """Return the 30K-run curriculum stage (24 environment steps/iteration)."""
+        step = int(self._env.common_step_counter)
+        if step < 5_000 * 24:
+            return 0
+        if step < 12_000 * 24:
+            return 1
+        if step < 22_000 * 24:
+            return 2
+        return 3
+
+    @staticmethod
+    def _stage_values(stage: int):
+        # static/moving/A* probabilities, moving speed, A* hold, jitter sigma,
+        # sharp-replan probability, and maximum sharp turn.
+        return (
+            ((0.70, 0.20, 0.10), (0.10, 0.30), (2.0, 4.0), (0.00, 0.00), 0.00, 0.0),
+            ((0.40, 0.35, 0.25), (0.10, 0.60), (1.0, 3.0), (0.01, math.radians(1.0)), 0.02, math.radians(25.0)),
+            ((0.20, 0.45, 0.35), (0.15, 1.00), (0.8, 2.5), (0.02, math.radians(2.0)), 0.05, math.radians(40.0)),
+            ((0.10, 0.55, 0.35), (0.20, 1.50), (0.6, 2.0), (0.02, math.radians(2.0)), 0.08, math.radians(50.0)),
+        )[stage]
+
+    def _sample_time(self, ids, low: float, high: float):
+        if ids.numel() > 0:
+            self.time_left[ids] = torch.empty(ids.numel(), device=self.device).uniform_(low, high)
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if ids.numel() == 0:
+            return
+        super()._resample_command(ids)
+        n = ids.numel()
+        stage = self._curriculum_stage()
+        probabilities, speed_range, waypoint_hold, _, sharp_probability, sharp_max = self._stage_values(stage)
+        self.metrics["curriculum_stage"].fill_(float(stage))
+        mode = torch.multinomial(torch.tensor(probabilities, device=self.device), n, replacement=True)
+        self.goal_mode[ids] = mode
+        self.goal_velocity_w[ids] = 0.0
+        self.goal_yaw_rate[ids] = 0.0
+        self.command_settle_steps[ids] = 15
+
+        moving = ids[mode == self.MOVING]
+        if moving.numel() > 0:
+            k = moving.numel()
+            yaw = self.robot.data.heading_w[moving]
+            direction = yaw + torch.empty(k, device=self.device).uniform_(-0.7, 0.7)
+            distance = torch.empty(k, device=self.device).uniform_(0.5, 1.5)
+            speed = torch.empty(k, device=self.device).uniform_(*speed_range)
+            self.goal_pose_w[moving, 0] = self.robot.data.root_pos_w[moving, 0] + distance * torch.cos(direction)
+            self.goal_pose_w[moving, 1] = self.robot.data.root_pos_w[moving, 1] + distance * torch.sin(direction)
+            self.goal_pose_w[moving, 2] = direction
+            self.goal_velocity_w[moving, 0] = speed * torch.cos(direction)
+            self.goal_velocity_w[moving, 1] = speed * torch.sin(direction)
+            self.goal_yaw_rate[moving] = torch.empty(k, device=self.device).uniform_(-0.45, 0.45)
+
+        waypoint = ids[mode == self.WAYPOINT]
+        if waypoint.numel() > 0:
+            k = waypoint.numel()
+            gentle = torch.empty(k, device=self.device).uniform_(-math.radians(18.0), math.radians(18.0))
+            sharp = torch.rand(k, device=self.device) < sharp_probability
+            replan = torch.empty(k, device=self.device).uniform_(-sharp_max, sharp_max)
+            self.route_heading_w[waypoint] = wrap_to_pi(
+                self.route_heading_w[waypoint] + torch.where(sharp, replan, gentle)
+            )
+            direction = self.route_heading_w[waypoint]
+            distance = torch.empty(k, device=self.device).uniform_(0.35, 0.90)
+            self.goal_pose_w[waypoint, 0] = self.robot.data.root_pos_w[waypoint, 0] + distance * torch.cos(direction)
+            self.goal_pose_w[waypoint, 1] = self.robot.data.root_pos_w[waypoint, 1] + distance * torch.sin(direction)
+            self.goal_pose_w[waypoint, 2] = direction
+            self.category[waypoint] = 4
+
+        self._sample_time(ids[mode == self.STATIC], 2.0, 6.0)
+        self._sample_time(moving, 2.0, 5.0)
+        self._sample_time(waypoint, *waypoint_hold)
+
+    def _update_command(self):
+        moving = self.goal_mode == self.MOVING
+        self.goal_pose_w[moving, :2] += self.goal_velocity_w[moving] * self._env.step_dt
+        self.goal_pose_w[moving, 2] = wrap_to_pi(
+            self.goal_pose_w[moving, 2] + self.goal_yaw_rate[moving] * self._env.step_dt
+        )
+        delta = self.goal_pose_w[:, :2] - self.robot.data.root_pos_w[:, :2]
+        distance = torch.linalg.vector_norm(delta, dim=1)
+        too_far = moving & (distance > 2.0)
+        self.goal_pose_w[too_far, :2] = (
+            self.robot.data.root_pos_w[too_far, :2]
+            + 2.0 * delta[too_far] / distance[too_far, None].clamp_min(1.0e-6)
+        )
+
+        super()._update_command()
+        waypoint = self.goal_mode == self.WAYPOINT
+        reached = waypoint & (torch.linalg.vector_norm(self.goal_b[:, :2], dim=1) < 0.20)
+        self.time_left[reached] = 0.0
+
+        self.command_settle_steps.sub_(1).clamp_(min=0)
+        moving_speed = torch.linalg.vector_norm(self.goal_velocity_w, dim=1)
+        self.target_motion_speed = torch.where(moving, moving_speed, torch.zeros_like(moving_speed))
+        self.target_motion_speed = torch.where(
+            self.command_settle_steps > 0, torch.ones_like(self.target_motion_speed), self.target_motion_speed
+        )
+
+        stage = self._curriculum_stage()
+        _, _, _, jitter, _, _ = self._stage_values(stage)
+        if self._dynamic_update_counter % 5 == 0:
+            self.goal_jitter_b[:, :2] = (
+                torch.randn_like(self.goal_jitter_b[:, :2]).clamp_(-2.5, 2.5) * jitter[0]
+            )
+            self.goal_jitter_b[:, 2] = (
+                torch.randn_like(self.goal_jitter_b[:, 2]).clamp_(-3.0, 3.0) * jitter[1]
+            )
+        self._dynamic_update_counter += 1
+        self.goal_b[:, :2] += self.goal_jitter_b[:, :2]
+        noisy_heading = torch.atan2(self.goal_b[:, 2], self.goal_b[:, 3]) + self.goal_jitter_b[:, 2]
+        flicker = (torch.rand(self.num_envs, device=self.device) < 0.001) if stage >= 3 else torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        if flicker.any():
+            count = int(flicker.sum().item())
+            self.goal_b[flicker, :2] += torch.empty((count, 2), device=self.device).uniform_(-0.30, 0.30)
+            noisy_heading[flicker] += torch.empty(count, device=self.device).uniform_(
+                -math.radians(15.0), math.radians(15.0)
+            )
+        self.goal_b[:, 2] = torch.sin(noisy_heading)
+        self.goal_b[:, 3] = torch.cos(noisy_heading)
+
+
 @configclass
 class UniformSE2GoalCommandCfg(CommandTermCfg):
     class_type: type = UniformSE2GoalCommand

@@ -82,13 +82,25 @@ class GoToCoreTests(unittest.TestCase):
         self.assertEqual(rewards, {
             "constellation", "progress", "success", "upright", "vertical_velocity",
             "roll_pitch_rate", "action_rate", "joint_velocity", "joint_acceleration", "torque",
-            "mechanical_power", "joint_limits", "nominal_pose", "foot_slip", "undesired_contact",
+            "joint_limits", "nominal_pose", "near_goal_foot_spacing",
+            "near_stable_goal_stand_posture",
+            "foot_slip", "undesired_contact",
         })
         source = env_cfg.read_text(encoding="utf-8")
         self.assertIn("self.events.recovery_push = None", source)
         self.assertIn("self.events.sustained_push = None", source)
         self.assertIn("self.events.recovery_push = robust_events.recovery_push", source)
         self.assertIn("self.events.sustained_push = robust_events.sustained_push", source)
+
+    def test_dynamic_task_keeps_policy_interface_and_benign_randomization(self):
+        mdp_source = MODULE.with_name("mdp.py").read_text(encoding="utf-8")
+        env_cfg = MODULE.parents[1] / "robots/k1/goto/env_cfg.py"
+        env_source = env_cfg.read_text(encoding="utf-8")
+        self.assertIn("class MixedDynamicSE2GoalCommand", mdp_source)
+        self.assertIn("super()._update_command()", mdp_source)
+        self.assertIn("class K1GoToDynamicEnvCfg", env_source)
+        self.assertIn("self.events.body_com = None", env_source)
+        self.assertIn("self.events.pd_gains = None", env_source)
 
     def test_sampler_range_and_probabilities(self):
         rng = random.Random(7)
