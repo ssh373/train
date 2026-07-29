@@ -74,9 +74,11 @@ if args_cli.distributed and version.parse(installed_version) < version.parse(RSL
 """Rest everything follows."""
 
 import gymnasium as gym
+import numpy as np
 import os
 import torch
 from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
 
 import omni
 from rsl_rl.runners import OnPolicyRunner
@@ -103,6 +105,81 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+class TensorBoardVideoWrapper(gym.Wrapper):
+    """Record periodic render clips into TensorBoard without interrupting training."""
+
+    def __init__(self, env, log_dir: str, video_length: int, video_interval: int, steps_per_iteration: int, fps: int):
+        super().__init__(env)
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.video_length = video_length
+        self.video_interval = video_interval
+        self.steps_per_iteration = steps_per_iteration
+        self.fps = fps
+        self.step_count = 0
+        self.frames = []
+        # Match Gymnasium RecordVideo: record a clip immediately at the start.
+        self.recording = True
+        self.clip_start_step = 0
+
+    def _capture_frame(self):
+        frame = self.env.render()
+        if frame is None:
+            return
+        frame = np.asarray(frame)
+        # Some renderers return a batch; TensorBoard records env 0 only.
+        if frame.ndim == 4:
+            frame = frame[0]
+        if frame.ndim != 3:
+            raise ValueError(f"Expected an HWC render frame, got shape {frame.shape}")
+        if frame.shape[-1] == 4:
+            frame = frame[..., :3]
+        if frame.shape[-1] != 3:
+            raise ValueError(f"Expected an RGB/RGBA render frame, got shape {frame.shape}")
+        self.frames.append(np.ascontiguousarray(frame))
+
+    def _write_clip(self):
+        if not self.frames:
+            return
+        video = torch.from_numpy(np.stack(self.frames))
+        video = video.permute(0, 3, 1, 2).unsqueeze(0)  # N,T,C,H,W
+        if video.is_floating_point():
+            if float(video.max()) > 1.0:
+                video = video / 255.0
+            video = video.clamp_(0.0, 1.0)
+        iteration = self.clip_start_step // self.steps_per_iteration
+        self.writer.add_video("Video/train", video, global_step=iteration, fps=self.fps)
+        self.writer.flush()
+
+    def step(self, action):
+        result = self.env.step(action)
+        self.step_count += 1
+        if not self.recording and self.step_count % self.video_interval == 0:
+            self.recording = True
+            self.clip_start_step = self.step_count
+        if self.recording:
+            try:
+                self._capture_frame()
+                if len(self.frames) >= self.video_length:
+                    self._write_clip()
+                    self.frames.clear()
+                    self.recording = False
+            except Exception as exc:
+                # Video is diagnostic only; never sacrifice a long training run.
+                print(f"[WARNING] TensorBoard video recording failed: {exc}", flush=True)
+                self.frames.clear()
+                self.recording = False
+        return result
+
+    def close(self):
+        if self.frames:
+            try:
+                self._write_clip()
+            except Exception as exc:
+                print(f"[WARNING] TensorBoard final video write failed: {exc}", flush=True)
+        self.writer.close()
+        return super().close()
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -173,6 +250,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        env = TensorBoardVideoWrapper(
+            env,
+            log_dir=log_dir,
+            video_length=args_cli.video_length,
+            video_interval=args_cli.video_interval,
+            steps_per_iteration=agent_cfg.num_steps_per_env,
+            fps=round(1.0 / env_cfg.sim.dt / env_cfg.decimation),
+        )
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
