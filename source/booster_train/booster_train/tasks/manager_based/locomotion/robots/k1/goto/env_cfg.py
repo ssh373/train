@@ -249,7 +249,7 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    constellation = RewTerm(func=mdp.constellation_reward, weight=3.0, params={
+    constellation = RewTerm(func=mdp.constellation_reward, weight=2.0, params={
         "command_name": "pose_goal", "radius": 0.7})
     success = RewTerm(func=mdp.goal_success, weight=2.0, params={
         "command_name": "pose_goal", "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET)})
