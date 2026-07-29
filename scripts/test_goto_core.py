@@ -80,10 +80,9 @@ class GoToCoreTests(unittest.TestCase):
             if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
         }
         self.assertEqual(rewards, {
-            "constellation", "progress", "success", "upright", "vertical_velocity",
+            "constellation", "success", "upright", "vertical_velocity",
             "roll_pitch_rate", "action_rate", "joint_velocity", "joint_acceleration", "torque",
-            "joint_limits", "nominal_pose", "near_goal_foot_spacing",
-            "near_stable_goal_stand_posture",
+            "joint_limits", "nominal_pose",
             "foot_slip", "undesired_contact",
         })
         source = env_cfg.read_text(encoding="utf-8")

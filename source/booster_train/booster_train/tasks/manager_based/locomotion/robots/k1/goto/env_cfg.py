@@ -11,7 +11,6 @@ from isaaclab.managers import (
     EventTermCfg as EventTerm, ObservationGroupCfg as ObsGroup, ObservationTermCfg as ObsTerm,
     RewardTermCfg as RewTerm, SceneEntityCfg, TerminationTermCfg as DoneTerm,
 )
-from isaaclab.managers.manager_base import ManagerTermBase
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -27,75 +26,6 @@ from booster_train.tasks.manager_based.locomotion.goto import mdp
 LEGS = [".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"]
 FEET = ["left_foot_link", "right_foot_link"]
 NOMINAL_BASE_HEIGHT = float(BOOSTER_K1_CFG.init_state.pos[2])
-
-
-class NearGoalFootSpacingPenalty(ManagerTermBase):
-    """Penalize only excessive lateral foot spacing after reaching the pose goal."""
-
-    def __init__(self, cfg, env):
-        super().__init__(cfg, env)
-        asset_cfg = cfg.params["asset_cfg"]
-        robot = env.scene[asset_cfg.name]
-        self.nominal_spacing = self._spacing(robot, asset_cfg.body_ids).detach().clone()
-
-    @staticmethod
-    def _spacing(robot, body_ids):
-        feet_delta_w = robot.data.body_pos_w[:, body_ids[0], :2] - robot.data.body_pos_w[:, body_ids[1], :2]
-        yaw = robot.data.heading_w
-        lateral_delta = -torch.sin(yaw) * feet_delta_w[:, 0] + torch.cos(yaw) * feet_delta_w[:, 1]
-        return torch.abs(lateral_delta)
-
-    def __call__(
-        self,
-        env,
-        command_name: str,
-        asset_cfg: SceneEntityCfg,
-        max_extra_spacing: float,
-        penalty_scale: float,
-        position_threshold: float,
-        orientation_threshold: float,
-    ):
-        robot = env.scene[asset_cfg.name]
-        spacing = self._spacing(robot, asset_cfg.body_ids)
-        excess = torch.clamp(spacing - (self.nominal_spacing + max_extra_spacing), min=0.0)
-        penalty = torch.square(excess / penalty_scale)
-        near_goal = mdp.standing_mask(
-            env,
-            command_name,
-            position_threshold=position_threshold,
-            orientation_threshold=orientation_threshold,
-        )
-        return torch.where(near_goal, penalty, torch.zeros_like(penalty))
-
-
-class NearStableGoalStandPosturePenalty(ManagerTermBase):
-    """Return the legs smoothly to their default pose near a stable goal."""
-
-    def __init__(self, cfg, env):
-        super().__init__(cfg, env)
-        asset_cfg = cfg.params["asset_cfg"]
-        self.robot = env.scene[asset_cfg.name]
-        self.joint_ids = asset_cfg.joint_ids
-
-    def __call__(self, env, command_name: str, asset_cfg: SceneEntityCfg,
-                 enter_radius: float, full_radius: float, max_goal_speed: float):
-        term = env.command_manager.get_term(command_name)
-        dx, dy, _ = term._relative_pose()
-        distance = torch.sqrt(dx.square() + dy.square())
-        blend = torch.clamp(
-            (enter_radius - distance) / max(enter_radius - full_radius, 1.0e-6), 0.0, 1.0
-        )
-        blend = blend.square() * (3.0 - 2.0 * blend)
-        target_speed = getattr(term, "target_motion_speed", torch.zeros_like(distance))
-        stable = (target_speed < max_goal_speed).float()
-        posture_error = torch.sum(
-            torch.square(
-                self.robot.data.joint_pos[:, self.joint_ids]
-                - self.robot.data.default_joint_pos[:, self.joint_ids]
-            ),
-            dim=1,
-        )
-        return blend * stable * posture_error
 
 
 class VisualizedSE2GoalCommand(mdp.UniformSE2GoalCommand):
@@ -321,7 +251,6 @@ class ObservationsCfg:
 class RewardsCfg:
     constellation = RewTerm(func=mdp.constellation_reward, weight=1.0, params={
         "command_name": "pose_goal", "radius": 1.0})
-    progress = RewTerm(func=mdp.goal_progress, weight=2.0, params={"command_name": "pose_goal"})
     success = RewTerm(func=mdp.goal_success, weight=2.0, params={
         "command_name": "pose_goal", "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET)})
     upright = RewTerm(func=common_mdp.flat_orientation_l2, weight=-0.5)
@@ -334,23 +263,6 @@ class RewardsCfg:
     joint_limits = RewTerm(func=common_mdp.joint_pos_limits, weight=-2.0)
     nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.03,
                            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
-    near_goal_foot_spacing = RewTerm(func=NearGoalFootSpacingPenalty, weight=-0.2, params={
-        "command_name": "pose_goal",
-        "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
-        "max_extra_spacing": 0.04,
-        "penalty_scale": 0.05,
-        "position_threshold": 0.10,
-        "orientation_threshold": 0.15,
-    })
-    near_stable_goal_stand_posture = RewTerm(
-        func=NearStableGoalStandPosturePenalty, weight=0.0, params={
-            "command_name": "pose_goal",
-            "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS),
-            "enter_radius": 0.30,
-            "full_radius": 0.10,
-            "max_goal_speed": 0.05,
-        },
-    )
     foot_slip = RewTerm(func=common_mdp.feet_slide, weight=-0.1, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
@@ -488,7 +400,6 @@ class K1GoToDynamicEnvCfg(K1GoToEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.commands.pose_goal.class_type = mdp.MixedDynamicSE2GoalCommand
-        self.rewards.near_stable_goal_stand_posture.weight = -0.5
         self.episode_length_s = 30.0
 
         # Match the benign randomization profile of the best historical 30K run.

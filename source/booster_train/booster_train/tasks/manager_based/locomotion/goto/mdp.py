@@ -379,10 +379,6 @@ def excessive_tilt(env, termination_tilt=math.radians(60.0), asset_cfg=SceneEnti
     return torch.acos(torch.clamp(body_up_dot, -1.0, 1.0)) >= termination_tilt
 
 
-def goal_progress(env, command_name="pose_goal"):
-    return _term(env, command_name).progress
-
-
 def goal_success(env, command_name="pose_goal", position_threshold=0.05, orientation_threshold=0.1,
                  linear_speed_threshold=0.1, angular_speed_threshold=0.1,
                  sensor_cfg=SceneEntityCfg("contact_forces", body_names=["left_foot_link", "right_foot_link"]),
