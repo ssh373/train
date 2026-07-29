@@ -21,6 +21,14 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
+    "--tensorboard_video", action="store_true", default=False,
+    help="Also write the recorded fixed-policy clip to the checkpoint run's TensorBoard log.",
+)
+parser.add_argument(
+    "--video_iteration", type=int, default=None,
+    help="Learning iteration used as the TensorBoard video step.",
+)
+parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
@@ -55,9 +63,11 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import numpy as np
 import os
 import time
 import torch
+from torch.utils.tensorboard import SummaryWriter
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -127,6 +137,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
+            "name_prefix": (
+                f"checkpoint-{args_cli.video_iteration}"
+                if args_cli.video_iteration is not None
+                else "play"
+            ),
         }
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
@@ -184,6 +199,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if version("rsl-rl-lib").startswith("2.3."):
         obs, _ = obs
     timestep = 0
+    tensorboard_frames = []
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -194,6 +210,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # env stepping
             obs, _, _, _ = env.step(actions)
         if args_cli.video:
+            if args_cli.tensorboard_video:
+                frame = env.unwrapped.render()
+                if frame is not None:
+                    frame = np.asarray(frame)
+                    if frame.ndim == 4:
+                        frame = frame[0]
+                    if frame.ndim == 3 and frame.shape[-1] in (3, 4):
+                        tensorboard_frames.append(np.ascontiguousarray(frame[..., :3]))
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
@@ -203,6 +227,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if args_cli.tensorboard_video:
+        if not tensorboard_frames:
+            print("[WARNING] No RGB frames were captured for TensorBoard.")
+        else:
+            video = torch.from_numpy(np.stack(tensorboard_frames))
+            video = video.permute(0, 3, 1, 2).unsqueeze(0)  # N,T,C,H,W
+            if video.is_floating_point():
+                if float(video.max()) > 1.0:
+                    video = video / 255.0
+                video = video.clamp_(0.0, 1.0)
+            writer = SummaryWriter(log_dir=log_dir)
+            writer.add_video(
+                "Video/checkpoint",
+                video,
+                global_step=args_cli.video_iteration or 0,
+                fps=round(1.0 / env.unwrapped.step_dt),
+            )
+            writer.flush()
+            writer.close()
+            print(
+                f"[INFO] TensorBoard checkpoint video logged at iteration "
+                f"{args_cli.video_iteration or 0}."
+            )
 
     # close the simulator
     env.close()

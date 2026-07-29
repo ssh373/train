@@ -21,6 +21,18 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--checkpoint_videos", action="store_true", default=False,
+    help="Pause at saved checkpoints and record a fixed-policy evaluation clip in a separate process.",
+)
+parser.add_argument(
+    "--checkpoint_video_length", type=int, default=250,
+    help="Length of each fixed-checkpoint evaluation clip (in policy steps).",
+)
+parser.add_argument(
+    "--checkpoint_video_interval", type=int, default=None,
+    help="Checkpoint-video interval in learning iterations (defaults to save_interval).",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -37,6 +49,13 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if args_cli.video and args_cli.checkpoint_videos:
+    parser.error("Use either --video (live training video) or --checkpoint_videos (frozen checkpoint evaluation), not both.")
+if args_cli.checkpoint_video_length <= 0:
+    parser.error("--checkpoint_video_length must be positive.")
+if args_cli.checkpoint_video_interval is not None and args_cli.checkpoint_video_interval <= 0:
+    parser.error("--checkpoint_video_interval must be positive.")
 
 # always enable cameras to record video
 if args_cli.video:
@@ -74,11 +93,10 @@ if args_cli.distributed and version.parse(installed_version) < version.parse(RSL
 """Rest everything follows."""
 
 import gymnasium as gym
-import numpy as np
 import os
+import subprocess
 import torch
 from datetime import datetime
-from torch.utils.tensorboard import SummaryWriter
 
 import omni
 from rsl_rl.runners import OnPolicyRunner
@@ -107,79 +125,69 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-class TensorBoardVideoWrapper(gym.Wrapper):
-    """Record periodic render clips into TensorBoard without interrupting training."""
+class CheckpointVideoRunner(OnPolicyRunner):
+    """HTWK-style runner: save, then evaluate that frozen checkpoint in a child process."""
 
-    def __init__(self, env, log_dir: str, video_length: int, video_interval: int, steps_per_iteration: int, fps: int):
-        super().__init__(env)
-        self.writer = SummaryWriter(log_dir=log_dir)
-        self.video_length = video_length
-        self.video_interval = video_interval
-        self.steps_per_iteration = steps_per_iteration
-        self.fps = fps
-        self.step_count = 0
-        self.frames = []
-        # Match Gymnasium RecordVideo: record a clip immediately at the start.
-        self.recording = True
-        self.clip_start_step = 0
+    checkpoint_video_enabled = False
+    checkpoint_video_interval = 0
+    checkpoint_video_length = 250
+    checkpoint_video_task = ""
+    checkpoint_video_device = "cuda:0"
+    checkpoint_video_script = ""
 
-    def _capture_frame(self):
-        frame = self.env.render()
-        if frame is None:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recorded_video_iterations = set()
+
+    def save(self, path: str, infos: dict | None = None) -> None:
+        super().save(path, infos)
+        iteration = int(self.current_learning_iteration)
+        if (
+            not self.checkpoint_video_enabled
+            or iteration <= 0
+            or self.checkpoint_video_interval <= 0
+            or iteration % self.checkpoint_video_interval != 0
+            or iteration in self._recorded_video_iterations
+        ):
             return
-        frame = np.asarray(frame)
-        # Some renderers return a batch; TensorBoard records env 0 only.
-        if frame.ndim == 4:
-            frame = frame[0]
-        if frame.ndim != 3:
-            raise ValueError(f"Expected an HWC render frame, got shape {frame.shape}")
-        if frame.shape[-1] == 4:
-            frame = frame[..., :3]
-        if frame.shape[-1] != 3:
-            raise ValueError(f"Expected an RGB/RGBA render frame, got shape {frame.shape}")
-        self.frames.append(np.ascontiguousarray(frame))
 
-    def _write_clip(self):
-        if not self.frames:
-            return
-        video = torch.from_numpy(np.stack(self.frames))
-        video = video.permute(0, 3, 1, 2).unsqueeze(0)  # N,T,C,H,W
-        if video.is_floating_point():
-            if float(video.max()) > 1.0:
-                video = video / 255.0
-            video = video.clamp_(0.0, 1.0)
-        iteration = self.clip_start_step // self.steps_per_iteration
-        self.writer.add_video("Video/train", video, global_step=iteration, fps=self.fps)
-        self.writer.flush()
-
-    def step(self, action):
-        result = self.env.step(action)
-        self.step_count += 1
-        if not self.recording and self.step_count % self.video_interval == 0:
-            self.recording = True
-            self.clip_start_step = self.step_count
-        if self.recording:
-            try:
-                self._capture_frame()
-                if len(self.frames) >= self.video_length:
-                    self._write_clip()
-                    self.frames.clear()
-                    self.recording = False
-            except Exception as exc:
-                # Video is diagnostic only; never sacrifice a long training run.
-                print(f"[WARNING] TensorBoard video recording failed: {exc}", flush=True)
-                self.frames.clear()
-                self.recording = False
-        return result
-
-    def close(self):
-        if self.frames:
-            try:
-                self._write_clip()
-            except Exception as exc:
-                print(f"[WARNING] TensorBoard final video write failed: {exc}", flush=True)
-        self.writer.close()
-        return super().close()
+        self._recorded_video_iterations.add(iteration)
+        run_dir = os.path.dirname(os.path.abspath(path))
+        video_log_dir = os.path.join(run_dir, "video_logs")
+        os.makedirs(video_log_dir, exist_ok=True)
+        stdout_path = os.path.join(video_log_dir, f"video_iter_{iteration}_stdout.log")
+        stderr_path = os.path.join(video_log_dir, f"video_iter_{iteration}_stderr.log")
+        cmd = [
+            sys.executable,
+            self.checkpoint_video_script,
+            "--task", self.checkpoint_video_task,
+            "--checkpoint", os.path.abspath(path),
+            "--num_envs", "1",
+            "--headless",
+            "--video",
+            "--video_length", str(self.checkpoint_video_length),
+            "--tensorboard_video",
+            "--video_iteration", str(iteration),
+            "--device", self.checkpoint_video_device,
+        ]
+        print(f"[INFO] Recording frozen checkpoint video for iteration {iteration}.")
+        print(f"[INFO] Video command: {' '.join(cmd)}")
+        try:
+            with open(stdout_path, "w", encoding="utf-8") as stdout_file, open(
+                stderr_path, "w", encoding="utf-8"
+            ) as stderr_file:
+                result = subprocess.run(cmd, stdout=stdout_file, stderr=stderr_file, check=False)
+            if result.returncode != 0:
+                print(
+                    f"[WARNING] Checkpoint video process failed with code {result.returncode}. "
+                    f"See {stderr_path}",
+                    flush=True,
+                )
+            else:
+                print(f"[INFO] Checkpoint video completed for iteration {iteration}.", flush=True)
+        except Exception as exc:
+            # Diagnostic recording must not destroy a long training run.
+            print(f"[WARNING] Could not launch checkpoint video process: {exc}", flush=True)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -250,20 +258,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
-        env = TensorBoardVideoWrapper(
-            env,
-            log_dir=log_dir,
-            video_length=args_cli.video_length,
-            video_interval=args_cli.video_interval,
-            steps_per_iteration=agent_cfg.num_steps_per_env,
-            fps=round(1.0 / env_cfg.sim.dt / env_cfg.decimation),
-        )
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    runner = CheckpointVideoRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    video_interval = (
+        args_cli.checkpoint_video_interval
+        if args_cli.checkpoint_video_interval is not None
+        else agent_cfg.save_interval
+    )
+    play_task = args_cli.task if args_cli.task.endswith("-Play") else f"{args_cli.task}-Play"
+    runner.checkpoint_video_enabled = args_cli.checkpoint_videos
+    runner.checkpoint_video_interval = int(video_interval)
+    runner.checkpoint_video_length = int(args_cli.checkpoint_video_length)
+    runner.checkpoint_video_task = play_task
+    runner.checkpoint_video_device = str(agent_cfg.device)
+    runner.checkpoint_video_script = os.path.join(os.path.dirname(__file__), "play.py")
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
