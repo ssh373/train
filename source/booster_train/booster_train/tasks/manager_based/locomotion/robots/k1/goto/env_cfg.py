@@ -344,6 +344,23 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
         self.commands.pose_goal.constellation_radius = self.constellation_radius
         self.rewards.constellation.params["radius"] = self.constellation_radius
 
+        # Benign base-training randomization.  Physical disturbances are added
+        # only by the dedicated Sim2Real/fine-tuning configuration.
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0), "y": (0.0, 0.0), "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
+        }
+        self.events.reset_joints.params["position_range"] = (-0.05, 0.05)
+        self.events.recovery_push = None
+        self.events.sustained_push = None
+        self.events.body_com = None
+        self.events.pd_gains = None
+        self.events.body_mass.params.update({
+            "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
+            "mass_distribution_params": (-0.5, 0.5),
+            "operation": "add",
+        })
+
 
 @configclass
 class K1GoToSmokeEnvCfg(K1GoToEnvCfg):
@@ -359,6 +376,10 @@ class K1GoToSim2RealEnvCfg(K1GoToEnvCfg):
         robust_events = EventsCfg()
         self.events.recovery_push = robust_events.recovery_push
         self.events.sustained_push = robust_events.sustained_push
+        self.events.friction = robust_events.friction
+        self.events.body_mass = robust_events.body_mass
+        self.events.body_com = robust_events.body_com
+        self.events.pd_gains = robust_events.pd_gains
         self.events.friction.params.update(static_friction_range=(0.6, 1.3), dynamic_friction_range=(0.5, 1.2))
         self.events.body_mass.params["mass_distribution_params"] = (0.85, 1.15)
         self.events.body_com.params["com_range"] = {
@@ -401,22 +422,6 @@ class K1GoToDynamicEnvCfg(K1GoToEnvCfg):
         super().__post_init__()
         self.commands.pose_goal.class_type = mdp.MixedDynamicSE2GoalCommand
         self.episode_length_s = 30.0
-
-        # Match the benign randomization profile of the best historical 30K run.
-        self.events.reset_base.params["pose_range"] = {
-            "x": (0.0, 0.0), "y": (0.0, 0.0), "roll": (0.0, 0.0),
-            "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
-        }
-        self.events.reset_joints.params["position_range"] = (-0.05, 0.05)
-        self.events.recovery_push = None
-        self.events.sustained_push = None
-        self.events.body_com = None
-        self.events.pd_gains = None
-        self.events.body_mass.params.update({
-            "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-            "mass_distribution_params": (-0.5, 0.5),
-            "operation": "add",
-        })
 
 
 @configclass
