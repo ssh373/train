@@ -261,8 +261,14 @@ class RewardsCfg:
     joint_acceleration = RewTerm(func=common_mdp.joint_acc_l2, weight=-2.5e-7)
     torque = RewTerm(func=common_mdp.joint_torques_l2, weight=-1.0e-5)
     joint_limits = RewTerm(func=common_mdp.joint_pos_limits, weight=-2.0)
-    nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.03,
+    nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.05,
                            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
+    feet_spacing = RewTerm(func=mdp.feet_lateral_spacing_l2, weight=-0.3, params={
+        "target_spacing": 0.18,
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
+    standing_foot_position = RewTerm(func=mdp.feet_position_reward, weight=1.0, params={
+        "command_name": "pose_goal",
+        "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
     foot_slip = RewTerm(func=common_mdp.feet_slide, weight=-0.1, params={
         "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})

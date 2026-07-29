@@ -82,7 +82,7 @@ class GoToCoreTests(unittest.TestCase):
         self.assertEqual(rewards, {
             "constellation", "success", "upright", "vertical_velocity",
             "roll_pitch_rate", "action_rate", "joint_velocity", "joint_acceleration", "torque",
-            "joint_limits", "nominal_pose",
+            "joint_limits", "nominal_pose", "feet_spacing", "standing_foot_position",
             "foot_slip", "undesired_contact",
         })
         source = env_cfg.read_text(encoding="utf-8")
