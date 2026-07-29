@@ -250,10 +250,10 @@ class ObservationsCfg:
 @configclass
 class RewardsCfg:
     constellation = RewTerm(func=mdp.constellation_reward, weight=3.0, params={
-        "command_name": "pose_goal", "radius": 1.0})
+        "command_name": "pose_goal", "radius": 0.7})
     success = RewTerm(func=mdp.goal_success, weight=2.0, params={
         "command_name": "pose_goal", "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET)})
-    upright = RewTerm(func=common_mdp.flat_orientation_l2, weight=-0.5)
+    upright = RewTerm(func=common_mdp.flat_orientation_l2, weight=-1.0)
     vertical_velocity = RewTerm(func=common_mdp.lin_vel_z_l2, weight=-0.5)
     roll_pitch_rate = RewTerm(func=common_mdp.ang_vel_xy_l2, weight=-0.05)
     action_rate = RewTerm(func=common_mdp.action_rate_l2, weight=-0.01)
