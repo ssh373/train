@@ -44,3 +44,24 @@ class SmokePPORunnerCfg(PPORunnerCfg):
     max_iterations = 5
     save_interval = 5
     experiment_name = "k1_goto_smoke"
+
+
+@configclass
+class FineTunePPORunnerCfg(PPORunnerCfg):
+    max_iterations = 30000
+    save_interval = 100
+    # Keep the same log root so --load_run can resolve an existing GoTo run.
+    # Use --run_name to distinguish the new fine-tuning output directory.
+    experiment_name = "k1_goto"
+
+    def __post_init__(self):
+        self.algorithm.learning_rate = 1.0e-4
+        self.algorithm.schedule = "adaptive"
+        self.algorithm.desired_kl = 0.005
+        self.algorithm.entropy_coef = 0.001
+
+
+@configclass
+class PhaseAPPORunnerCfg(FineTunePPORunnerCfg):
+    max_iterations = 5000
+    save_interval = 100

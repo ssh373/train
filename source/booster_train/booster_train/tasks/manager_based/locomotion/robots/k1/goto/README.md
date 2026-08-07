@@ -53,3 +53,51 @@ python scripts/rsl_rl/play.py --task Booster-K1-GoTo-v0-Play --checkpoint <check
 
 The final `play.py` command exports feed-forward TorchScript and ONNX under the checkpoint run's `exported` directory.
 Use the smoke task for wiring checks only; it has 64 environments and five PPO iterations. Full training uses 4096.
+
+## Arrival and changing-goal fine-tuning
+
+Start with the independent phase-A task. It always samples stationary pose
+goals, so stopping and resuming the run cannot advance it into dynamic-goal
+training:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Booster-K1-GoTo-PhaseA-v0 \
+  --resume --reset_optimizer \
+  --load_run <existing-k1_goto-run> \
+  --checkpoint <model_xxx.pt> \
+  --max_iterations 5000 \
+  --run_name arrival_phase_a
+```
+
+Inspect a saved phase-A checkpoint with:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Booster-K1-GoTo-PhaseA-v0-Play \
+  --checkpoint <phase-a-checkpoint> --num_envs 1
+```
+
+`Booster-K1-GoTo-FineTune-v0` keeps the 46-observation/12-action policy contract,
+adds smooth nominal-pose, zero-action, and stillness costs near stationary goals,
+and samples stops plus pre-arrival replans. Start from a validated GoTo checkpoint
+without restoring its optimizer, so the task-local fine-tuning learning rate
+(`1e-4`) is used. The flag changes behavior only when explicitly supplied:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Booster-K1-GoTo-FineTune-v0 \
+  --resume --reset_optimizer \
+  --load_run <existing-k1_goto-run> \
+  --checkpoint <model_xxx.pt> \
+  --max_iterations 30000 \
+  --run_name arrival_dynamic_ft
+```
+
+Evaluate/export with the matching play task:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Booster-K1-GoTo-FineTune-v0-Play \
+  --checkpoint <fine-tuned-checkpoint> --num_envs 1
+```

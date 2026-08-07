@@ -85,7 +85,22 @@ class GoToCoreTests(unittest.TestCase):
             "joint_limits", "nominal_pose", "feet_spacing", "standing_foot_position",
             "foot_slip", "undesired_contact",
         })
+        scene_terrain = next(
+            node.value for node in classes["SceneCfg"].body
+            if isinstance(node, ast.Assign) and node.targets[0].id == "terrain"
+        )
+        pose_goal = next(
+            node.value for node in classes["CommandsCfg"].body
+            if isinstance(node, ast.Assign) and node.targets[0].id == "pose_goal"
+        )
+        self.assertNotIn("constellation_radius", {keyword.arg for keyword in scene_terrain.keywords})
+        self.assertIn("constellation_radius", {keyword.arg for keyword in pose_goal.keywords})
         source = env_cfg.read_text(encoding="utf-8")
+        self.assertIn('"command_name": "pose_goal", "radius": 1.0', source)
+        self.assertNotIn('self.rewards.constellation.params["radius"]', source)
+        mdp_source = MODULE.with_name("mdp.py").read_text(encoding="utf-8")
+        for metric in ("goals_sampled", "goals_reached", "time_to_reach", "time_per_distance"):
+            self.assertIn(f'"{metric}"', mdp_source)
         self.assertIn("self.events.recovery_push = None", source)
         self.assertIn("self.events.sustained_push = None", source)
         self.assertIn("self.events.recovery_push = robust_events.recovery_push", source)

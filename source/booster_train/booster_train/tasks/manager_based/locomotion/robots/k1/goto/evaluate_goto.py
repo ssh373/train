@@ -63,6 +63,11 @@ def main(env_cfg, agent_cfg):
         term.goal_pose_w[i, 1] = root_xy[i, 1] + distance * torch.sin(world_angle)
         term.goal_pose_w[i, 2] = root_yaw[i] + heading
     term.just_resampled[:] = True
+    term.goal_elapsed_time[:] = 0.0
+    term.goal_reached[:] = False
+    term.track_goal_arrival[:] = True
+    dx, dy, dtheta = term._relative_pose()
+    term.initial_goal_distance[:] = torch.sqrt(term._distance(dx, dy, dtheta))
     term._update_command()
 
     n = len(commands)

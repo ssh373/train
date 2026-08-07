@@ -33,7 +33,13 @@ class UniformSE2GoalCommand(CommandTerm):
         self.just_resampled = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self.previous_distance = torch.zeros(self.num_envs, device=self.device)
         self.progress = torch.zeros(self.num_envs, device=self.device)
+        self.goal_elapsed_time = torch.zeros(self.num_envs, device=self.device)
+        self.initial_goal_distance = torch.ones(self.num_envs, device=self.device)
+        self.goal_reached = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.track_goal_arrival = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         for name in ("position_error", "orientation_error", "target_distance", "target_angle"):
+            self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
+        for name in ("goals_sampled", "goals_reached", "time_to_reach", "time_per_distance"):
             self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
 
     @property
@@ -59,6 +65,20 @@ class UniformSE2GoalCommand(CommandTerm):
         self.metrics["target_distance"] += torch.sqrt(dx.square() + dy.square())
         self.metrics["target_angle"] += torch.abs(dtheta)
 
+        self.goal_elapsed_time += self._env.step_dt
+        arrived = (torch.sqrt(dx.square() + dy.square()) < 0.05) & (torch.abs(dtheta) < 0.10)
+        first_arrival = self.track_goal_arrival & arrived & ~self.goal_reached
+        self.metrics["goals_reached"] += first_arrival.float()
+        self.metrics["time_to_reach"] += torch.where(
+            first_arrival, self.goal_elapsed_time, torch.zeros_like(self.goal_elapsed_time)
+        )
+        self.metrics["time_per_distance"] += torch.where(
+            first_arrival,
+            self.goal_elapsed_time / torch.clamp(self.initial_goal_distance, min=1.0e-6),
+            torch.zeros_like(self.goal_elapsed_time),
+        )
+        self.goal_reached |= first_arrival
+
     def _resample_command(self, env_ids: Sequence[int]):
         ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         n = len(ids)
@@ -82,6 +102,15 @@ class UniformSE2GoalCommand(CommandTerm):
         self.goal_pose_w[ids, 2] = wrap_to_pi(yaw + rel[:, 2])
         self.category[ids] = category
         self.just_resampled[ids] = True
+        self.goal_elapsed_time[ids] = 0.0
+        self.initial_goal_distance[ids] = torch.sqrt(
+            rel[:, 0].square()
+            + rel[:, 1].square()
+            + 2.0 * self.cfg.constellation_radius**2 * (1.0 - torch.cos(rel[:, 2]))
+        )
+        self.goal_reached[ids] = False
+        self.track_goal_arrival[ids] = category != 0
+        self.metrics["goals_sampled"][ids] += self.track_goal_arrival[ids].float()
 
     def _update_command(self):
         dx, dy, dtheta = self._relative_pose()
@@ -186,6 +215,18 @@ class MixedDynamicSE2GoalCommand(UniformSE2GoalCommand):
             self.goal_pose_w[waypoint, 2] = direction
             self.category[waypoint] = 4
 
+        # Moving/waypoint modes replace the base sample, so refresh their
+        # initial error and ensure even a replaced stand sample is evaluated.
+        dynamic = ids[mode != self.STATIC]
+        if dynamic.numel() > 0:
+            newly_tracked = ~self.track_goal_arrival[dynamic]
+            self.metrics["goals_sampled"][dynamic] += newly_tracked.float()
+            self.track_goal_arrival[dynamic] = True
+            dx, dy, dtheta = self._relative_pose()
+            self.initial_goal_distance[dynamic] = torch.sqrt(
+                self._distance(dx[dynamic], dy[dynamic], dtheta[dynamic])
+            )
+
         self._sample_time(ids[mode == self.STATIC], 2.0, 6.0)
         self._sample_time(moving, 2.0, 5.0)
         self._sample_time(waypoint, *waypoint_hold)
@@ -247,7 +288,6 @@ class UniformSE2GoalCommandCfg(CommandTermCfg):
     asset_name: str = MISSING
     category_probabilities: tuple[float, float, float, float, float] = (0.10, 0.20, 0.20, 0.20, 0.30)
     constellation_radius: float = 1.0
-
     @configclass
     class Ranges:
         delta_x: tuple[float, float] = (-2.0, 2.0)
@@ -276,6 +316,45 @@ def standing_mask(env, command_name="pose_goal", position_threshold=0.05, orient
     """Shared pose-only standing gate used by paper reward terms."""
     dx, dy, dtheta = _term(env, command_name)._relative_pose()
     return (torch.sqrt(dx.square() + dy.square()) < position_threshold) & (torch.abs(dtheta) < orientation_threshold)
+
+
+def _arrival_gate(env, command_name="pose_goal", position_scale=0.12, orientation_scale=0.20):
+    """Smooth, stationary-target gate for arrival-only posture rewards."""
+    term = _term(env, command_name)
+    dx, dy, dtheta = term._relative_pose()
+    position_error = torch.sqrt(dx.square() + dy.square())
+    gate = torch.exp(-((position_error / position_scale).square()
+                       + (torch.abs(dtheta) / orientation_scale).square()))
+    target_speed = getattr(term, "target_motion_speed", None)
+    if target_speed is not None:
+        gate = gate * (target_speed < 0.05).float()
+    return gate
+
+
+def arrival_joint_deviation_l1(env, command_name="pose_goal",
+                               asset_cfg=SceneEntityCfg("robot")):
+    """Drive the legs to the configured nominal pose only near a static goal."""
+    robot = env.scene[asset_cfg.name]
+    error = torch.sum(torch.abs(
+        robot.data.joint_pos[:, asset_cfg.joint_ids]
+        - robot.data.default_joint_pos[:, asset_cfg.joint_ids]
+    ), dim=1)
+    return _arrival_gate(env, command_name) * error
+
+
+def arrival_action_l2(env, command_name="pose_goal"):
+    """Remove residual policy action near a static goal."""
+    action = env.action_manager.action
+    return _arrival_gate(env, command_name) * torch.sum(action.square(), dim=1)
+
+
+def arrival_stillness_l2(env, command_name="pose_goal",
+                         asset_cfg=SceneEntityCfg("robot")):
+    """Penalize planar and yaw motion while settling at a static goal."""
+    robot = env.scene[asset_cfg.name]
+    speed = torch.sum(robot.data.root_lin_vel_b[:, :2].square(), dim=1)
+    yaw_rate = robot.data.root_ang_vel_b[:, 2].square()
+    return _arrival_gate(env, command_name) * (speed + yaw_rate)
 
 
 def base_height_reward(env, nominal_base_height: float, asset_cfg=SceneEntityCfg("robot")):

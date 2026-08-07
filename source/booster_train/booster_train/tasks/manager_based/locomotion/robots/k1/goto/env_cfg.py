@@ -129,6 +129,12 @@ class AStarLikeSE2GoalCommand(VisualizedSE2GoalCommand):
         self.goal_pose_w[ids, 2] = heading
         self.category[ids] = 4  # combined translation + heading
         self.just_resampled[ids] = True
+        self.goal_elapsed_time[ids] = 0.0
+        self.goal_reached[ids] = False
+        self.track_goal_arrival[ids] = True
+        dx, dy, dtheta = self._relative_pose()
+        self.initial_goal_distance[ids] = torch.sqrt(self._distance(dx[ids], dy[ids], dtheta[ids]))
+        self.metrics["goals_sampled"][ids] += 1.0
 
     def _update_command(self):
         super()._update_command()
@@ -189,7 +195,20 @@ class SceneCfg(InteractiveSceneCfg):
         debug_vis=False,
     )
     light = AssetBaseCfg(prim_path="/World/light", spawn=sim_utils.DistantLightCfg(intensity=3000.0))
-    robot: ArticulationCfg = BOOSTER_K1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    # Keep GoTo's nominal pose task-local, just like K1 kick. This makes the
+    # pose independent of whichever shared BOOSTER_K1_CFG is installed while
+    # preserving that shared config's actuator model and limits.
+    robot: ArticulationCfg = BOOSTER_K1_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=BOOSTER_K1_CFG.init_state.replace(
+            pos=(0.0, 0.0, 0.58),
+            joint_pos={
+                ".*_Hip_Pitch": -0.2,
+                ".*_Knee_Pitch": 0.4,
+                ".*_Ankle_Pitch": -0.25,
+            },
+        ),
+    )
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True)
 
@@ -250,7 +269,7 @@ class ObservationsCfg:
 @configclass
 class RewardsCfg:
     constellation = RewTerm(func=mdp.constellation_reward, weight=2.0, params={
-        "command_name": "pose_goal", "radius": 0.7})
+        "command_name": "pose_goal", "radius": 1.0})
     success = RewTerm(func=mdp.goal_success, weight=2.0, params={
         "command_name": "pose_goal", "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET)})
     upright = RewTerm(func=common_mdp.flat_orientation_l2, weight=-1.0)
@@ -263,6 +282,12 @@ class RewardsCfg:
     joint_limits = RewTerm(func=common_mdp.joint_pos_limits, weight=-2.0)
     nominal_pose = RewTerm(func=common_mdp.joint_deviation_l1, weight=-0.05,
                            params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
+    arrival_nominal_pose = RewTerm(func=mdp.arrival_joint_deviation_l1, weight=0.0, params={
+        "command_name": "pose_goal", "asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)})
+    arrival_action = RewTerm(func=mdp.arrival_action_l2, weight=0.0, params={
+        "command_name": "pose_goal"})
+    arrival_stillness = RewTerm(func=mdp.arrival_stillness_l2, weight=0.0, params={
+        "command_name": "pose_goal", "asset_cfg": SceneEntityCfg("robot")})
     feet_spacing = RewTerm(func=mdp.feet_lateral_spacing_l2, weight=-0.3, params={
         "target_spacing": 0.18,
         "asset_cfg": SceneEntityCfg("robot", body_names=FEET)})
@@ -329,7 +354,6 @@ class EventsCfg:
 @configclass
 class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
     seed: int = 42
-    constellation_radius: float = 1.0
     scene: SceneCfg = SceneCfg(num_envs=4096, env_spacing=5.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -346,10 +370,6 @@ class K1GoToEnvCfg(ManagerBasedRLEnvCfg):
         self.scene.contact_forces.update_period = self.sim.dt
         self.actions.joint_pos.scale = {k: v for k, v in K1_ACTION_SCALE.items()
                                         if any(token in k for token in ("Hip", "Knee", "Ankle"))}
-        # Keep paper parameters synchronized with the command/reward implementations.
-        self.commands.pose_goal.constellation_radius = self.constellation_radius
-        self.rewards.constellation.params["radius"] = self.constellation_radius
-
         # Benign base-training randomization.  Physical disturbances are added
         # only by the dedicated Sim2Real/fine-tuning configuration.
         self.events.reset_base.params["pose_range"] = {
@@ -431,6 +451,59 @@ class K1GoToDynamicEnvCfg(K1GoToEnvCfg):
 
 
 @configclass
+class K1GoToPhaseAEnvCfg(K1GoToEnvCfg):
+    """Static-goal-only fine-tuning for clean nominal arrival posture."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.arrival_nominal_pose.weight = -0.4
+        self.rewards.arrival_action.weight = -0.08
+        self.rewards.arrival_stillness.weight = -0.75
+
+
+@configclass
+class K1GoToPhaseAPlayEnvCfg(K1GoToPhaseAEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.events.friction = None
+        self.events.body_mass = None
+        self.observations.policy.enable_corruption = False
+        self.commands.pose_goal.class_type = VisualizedSE2GoalCommand
+        self.commands.pose_goal.debug_vis = True
+
+
+class ArrivalFineTuneSE2GoalCommand(mdp.MixedDynamicSE2GoalCommand):
+    """Dynamic goals biased toward stops and pre-arrival replans for fine-tuning."""
+
+    @staticmethod
+    def _stage_values(stage: int):
+        return (
+            # 0-5K: arrival posture only. Do not introduce moving targets or
+            # replans until the checkpoint has learned a clean stationary stop.
+            ((1.00, 0.00, 0.00), (0.10, 0.35), (1.5, 3.5), (0.00, 0.00), 0.00, 0.0),
+            # 5K-12K: retain a static majority while introducing mild changes.
+            ((0.55, 0.20, 0.25), (0.10, 0.60), (1.0, 3.0), (0.01, math.radians(1.0)), 0.04, math.radians(30.0)),
+            # 12K-22K: frequent pre-arrival replans and faster moving goals.
+            ((0.30, 0.30, 0.40), (0.15, 1.00), (0.8, 2.5), (0.02, math.radians(2.0)), 0.07, math.radians(40.0)),
+            # 22K+: final deployment-oriented distribution.
+            ((0.30, 0.30, 0.40), (0.20, 1.50), (0.6, 2.0), (0.02, math.radians(2.0)), 0.10, math.radians(50.0)),
+        )[stage]
+
+
+@configclass
+class K1GoToFineTuneEnvCfg(K1GoToDynamicEnvCfg):
+    """Arrival-pose and changing-goal distribution for checkpoint fine-tuning."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.pose_goal.class_type = ArrivalFineTuneSE2GoalCommand
+        self.rewards.arrival_nominal_pose.weight = -0.4
+        self.rewards.arrival_action.weight = -0.08
+        self.rewards.arrival_stillness.weight = -0.75
+
+
+@configclass
 class K1GoToDynamicPlayEnvCfg(K1GoToDynamicEnvCfg):
     """Deterministic visualization of the dynamic-goal training distribution."""
 
@@ -442,3 +515,13 @@ class K1GoToDynamicPlayEnvCfg(K1GoToDynamicEnvCfg):
         self.observations.policy.enable_corruption = False
         self.commands.pose_goal.class_type = VisualizedMixedDynamicSE2GoalCommand
         self.commands.pose_goal.debug_vis = True
+
+
+@configclass
+class K1GoToFineTunePlayEnvCfg(K1GoToFineTuneEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.events.friction = None
+        self.events.body_mass = None
+        self.observations.policy.enable_corruption = False
