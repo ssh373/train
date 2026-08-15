@@ -849,7 +849,7 @@ def post_kick_recovery(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """Track the post-kick phase and reward holding any dynamically stable stance."""
+    """Track the post-kick phase and reward settling into the default pose."""
     robot: Articulation = env.scene[robot_cfg.name]
     ball: RigidObject = env.scene[ball_cfg.name]
     if not hasattr(env, "_kick_happened"):
@@ -864,12 +864,13 @@ def post_kick_recovery(
     )
     env._kick_recovery_time += env._kick_happened.float() * env.step_dt
 
+    joint_error = torch.mean((robot.data.joint_pos - robot.data.default_joint_pos).square(), dim=1)
     joint_speed = torch.mean(robot.data.joint_vel.square(), dim=1)
     base_lin = torch.sum(robot.data.root_lin_vel_b.square(), dim=1)
     base_ang = torch.sum(robot.data.root_ang_vel_b.square(), dim=1)
     tilt = torch.sum(robot.data.projected_gravity_b[:, :2].square(), dim=1)
     stability = torch.exp(
-        -0.08 * joint_speed - 2.0 * base_lin - 0.5 * base_ang - 10.0 * tilt
+        -4.0 * joint_error - 0.05 * joint_speed - 2.0 * base_lin - 0.5 * base_ang - 10.0 * tilt
     )
     return stability * env._kick_happened.float()
 

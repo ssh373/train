@@ -286,10 +286,8 @@ class RewardsCfg:
     )
     walk_ready_after_kick = RewTerm(
         func=mdp.walk_ready_after_kick,
-        # Encourage a walk-compatible recovery posture after the initial
-        # bracing period, without making it dominate the kick objective.
-        weight=6.0,
-        params={"return_delay": 0.25},
+        weight=3.0,
+        params={"return_delay": 0.5},
     )
     base_height = RewTerm(
         func=mdp.base_height_l2,
