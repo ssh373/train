@@ -94,9 +94,15 @@ class VelocityKickEnvCfg(K1KickEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.episode_length_s = 9.0
-        self.events.reset_ball.params["x_range"] = (0.8, 1.2)
-        self.events.reset_ball.params["y_range"] = (-0.08, 0.08)
+        # Enough time for up to three walk -> kick -> recovery cycles.
+        self.episode_length_s = 36.0
+        # Initial curriculum stage. Later cycles are re-seeded by
+        # locomotion_kick.mdp with progressively wider distributions.
+        self.events.reset_ball.params["x_range"] = (1.2, 1.8)
+        self.events.reset_ball.params["y_range"] = (-0.15, 0.15)
+        self.events.reset_ball.params["angle_range_deg"] = (-30.0, 30.0)
+        self.events.reset_target.params["distance_range"] = (3.0, 5.0)
+        self.events.reset_target.params["angle_range_deg"] = (-15.0, 15.0)
         self.terminations.kick_success = None
         self.terminations.ball_not_kicked = None
 

@@ -10,6 +10,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
 
 
@@ -300,14 +301,15 @@ def reset_kick_target(
     distance_range: tuple[float, float] = (4.0, 4.0),
     angle_range_deg: tuple[float, float] = (-60.0, 60.0),
     visualize_target: bool = False,
-    target_radius: float = 0.25,
+    target_radius: float = 0.15,
+    origin_at_ball: bool = False,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     feet_cfg: SceneEntityCfg = SceneEntityCfg(
         "robot", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
     ),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ):
-    """Sample a target distance and angle relative to the robot's initial heading."""
+    """Sample a target angle, measuring distance from the robot or ball."""
     robot: Articulation = env.scene[robot_cfg.name]
     count = len(env_ids)
     if not hasattr(env, "_kick_target_w"):
@@ -318,12 +320,13 @@ def reset_kick_target(
     q = yaw_quat(robot.data.root_quat_w[env_ids])
     robot_yaw = torch.atan2(2.0 * q[:, 0] * q[:, 3], 1.0 - 2.0 * q[:, 3].square())
     world_angle = robot_yaw + relative_angle
-    env._kick_target_w[env_ids, 0] = robot.data.root_pos_w[env_ids, 0] + distance * torch.cos(world_angle)
-    env._kick_target_w[env_ids, 1] = robot.data.root_pos_w[env_ids, 1] + distance * torch.sin(world_angle)
+    ball: RigidObject = env.scene[ball_cfg.name]
+    target_origin = ball.data.root_pos_w[env_ids, :2] if origin_at_ball else robot.data.root_pos_w[env_ids, :2]
+    env._kick_target_w[env_ids, 0] = target_origin[:, 0] + distance * torch.cos(world_angle)
+    env._kick_target_w[env_ids, 1] = target_origin[:, 1] + distance * torch.sin(world_angle)
 
     # Choose the inside-foot geometry from ball -> target, not merely ball side.
     # A target left of the ball is struck with the right foot and vice versa.
-    ball: RigidObject = env.scene[ball_cfg.name]
     direction_w = torch.zeros(count, 3, device=env.device)
     direction_w[:, :2] = env._kick_target_w[env_ids] - ball.data.root_pos_w[env_ids, :2]
     if not hasattr(env, "_kick_direction_w"):
@@ -352,10 +355,11 @@ def reset_kick_target(
     # Keep the environment/foot dimensions aligned.  Flattening here can
     # mismatch the resolved body-id dimension during reset (e.g. 8192 vs
     # 53248), causing quat_apply_inverse() to fail in TorchScript.
+    foot_count = feet_delta_w.shape[1]
     feet_pos_b = quat_apply_inverse(
-        root_yaw[:, None, :].expand(-1, feet_delta_w.shape[1], -1),
-        feet_delta_w,
-    )
+        root_yaw[:, None, :].expand(-1, foot_count, -1).reshape(-1, 4),
+        feet_delta_w.reshape(-1, 3),
+    ).reshape(count, foot_count, 3)
     if not hasattr(env, "_kick_start_feet_b"):
         env._kick_start_feet_b = torch.zeros(env.num_envs, 2, 3, device=env.device)
         env._kick_start_feet_w = torch.zeros(env.num_envs, 2, 3, device=env.device)
@@ -881,11 +885,8 @@ def walk_ready_after_kick(
 ) -> torch.Tensor:
     """After initial bracing, softly return joints to a locomotion-ready state."""
     robot: Articulation = env.scene[robot_cfg.name]
-    kick_happened = getattr(
-        env, "_kick_happened", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    )
     recovery_time = getattr(env, "_kick_recovery_time", torch.zeros(env.num_envs, device=env.device))
-    active = kick_happened & (recovery_time >= return_delay)
+    active = recovery_time >= return_delay
     joint_error = torch.mean((robot.data.joint_pos - robot.data.default_joint_pos).square(), dim=1)
     joint_speed = torch.mean(robot.data.joint_vel.square(), dim=1)
     readiness = torch.exp(-4.0 * joint_error - 0.05 * joint_speed)
@@ -908,13 +909,26 @@ def post_kick_feet_grounded(
     if not hasattr(env, "_kick_start_feet_b"):
         return torch.zeros(env.num_envs, device=env.device)
 
-    feet_delta_w = robot.data.body_pos_w[:, asset_cfg.body_ids] - robot.data.root_pos_w[:, None, :]
+    if asset_cfg.body_names is not None:
+        feet_body_ids, _ = robot.find_bodies(
+            asset_cfg.body_names, preserve_order=asset_cfg.preserve_order
+        )
+    else:
+        feet_body_ids = asset_cfg.body_ids
+    feet_w = robot.data.body_pos_w[:, feet_body_ids]
+    if feet_w.shape[1] != 2:
+        raise ValueError(
+            f"post_kick_feet_grounded requires exactly two feet, got {feet_w.shape[1]} bodies."
+        )
+    feet_delta_w = feet_w - robot.data.root_pos_w[:, None, :]
     root_yaw = yaw_quat(robot.data.root_quat_w)
+    foot_count = feet_delta_w.shape[1]
     feet_b = quat_apply_inverse(
-        root_yaw[:, None, :].expand(-1, 2, -1).reshape(-1, 4), feet_delta_w.reshape(-1, 3)
-    ).reshape(env.num_envs, 2, 3)
+        root_yaw[:, None, :].expand(-1, foot_count, -1).reshape(-1, 4),
+        feet_delta_w.reshape(-1, 3),
+    ).reshape(env.num_envs, foot_count, 3)
     height_error = torch.mean((feet_b[:, :, 2] - env._kick_start_feet_b[:, :, 2]).square(), dim=1)
-    foot_speed = torch.mean(robot.data.body_lin_vel_w[:, asset_cfg.body_ids].square(), dim=(1, 2))
+    foot_speed = torch.mean(robot.data.body_lin_vel_w[:, feet_body_ids].square(), dim=(1, 2))
     grounded = torch.exp(-height_error / (height_std * height_std) - velocity_scale * foot_speed)
     active = kick_happened & (recovery_time >= return_delay)
     return grounded * active.float()
@@ -933,12 +947,24 @@ def recovery_step_to_start_stance(
     robot: Articulation = env.scene[asset_cfg.name]
     if not hasattr(env, "_kick_start_feet_b"):
         return torch.zeros(env.num_envs, device=env.device)
-    feet_w = robot.data.body_pos_w[:, asset_cfg.body_ids]
+    if asset_cfg.body_names is not None:
+        feet_body_ids, _ = robot.find_bodies(
+            asset_cfg.body_names, preserve_order=asset_cfg.preserve_order
+        )
+    else:
+        feet_body_ids = asset_cfg.body_ids
+    feet_w = robot.data.body_pos_w[:, feet_body_ids]
+    if feet_w.shape[1] != 2:
+        raise ValueError(
+            f"recovery_step_to_start_stance requires exactly two feet, got {feet_w.shape[1]} bodies."
+        )
     feet_delta_w = feet_w - robot.data.root_pos_w[:, None, :]
     root_yaw = yaw_quat(robot.data.root_quat_w)
+    foot_count = feet_delta_w.shape[1]
     feet_b = quat_apply_inverse(
-        root_yaw[:, None, :].expand(-1, 2, -1).reshape(-1, 4), feet_delta_w.reshape(-1, 3)
-    ).reshape(env.num_envs, 2, 3)
+        root_yaw[:, None, :].expand(-1, foot_count, -1).reshape(-1, 4),
+        feet_delta_w.reshape(-1, 3),
+    ).reshape(env.num_envs, foot_count, 3)
     invalid = ~env._kick_start_stance_valid
     if torch.any(invalid):
         env._kick_start_feet_b[invalid] = feet_b[invalid].detach()
@@ -959,6 +985,24 @@ def recovery_step_to_start_stance(
 def hip_roll_spread(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     robot: Articulation = env.scene[asset_cfg.name]
     return torch.sum(robot.data.joint_pos[:, asset_cfg.joint_ids].square(), dim=1)
+
+
+def feet_slide(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize horizontal foot speed while that foot is in ground contact."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    robot: Articulation = env.scene[asset_cfg.name]
+    foot_velocity_xy = robot.data.body_lin_vel_w[:, asset_cfg.body_ids, :2]
+    return torch.sum(foot_velocity_xy.norm(dim=-1) * contacts, dim=1)
 
 
 def feet_too_close(
@@ -994,7 +1038,7 @@ def body_twist(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCf
 def ball_success(
     env: ManagerBasedRLEnv,
     target_xy: tuple[float, float] = (4.0, 0.0),
-    target_radius: float = 0.25,
+    target_radius: float = 0.15,
     min_direction_score: float = 0.98,
     max_speed: float = 2.5,
     recovery_time: float = 0.8,
@@ -1028,10 +1072,23 @@ def ball_success(
         & kick_happened
     )
 
-    # Goal arrival is independent from the robot's recovery posture.  Recovery
-    # starts as soon as ``_kick_happened`` is latched and is trained by
-    # ``walk_ready_after_kick`` while the ball continues toward the target.
-    return env._kick_target_achieved
+    # Match the checkpoint-era recovery criterion: wait after the kick and
+    # require general balance, but do not prescribe foot placement, stance
+    # width, a support-foot step, or an exact joint pose.
+    recovered_long_enough = getattr(
+        env, "_kick_recovery_time", torch.zeros(env.num_envs, device=env.device)
+    ) >= recovery_time
+    base_speed = torch.norm(robot.data.root_lin_vel_b, dim=1)
+    tilt = torch.norm(robot.data.projected_gravity_b[:, :2], dim=1)
+    mean_joint_deviation = torch.mean(
+        torch.abs(robot.data.joint_pos - robot.data.default_joint_pos), dim=1
+    )
+    stable = (
+        (base_speed < max_base_speed)
+        & (tilt < max_tilt)
+        & (mean_joint_deviation < max_mean_joint_deviation)
+    )
+    return env._kick_target_achieved & recovered_long_enough & stable
 
 
 def ball_too_far(env: ManagerBasedEnv, max_distance: float, ball_cfg: SceneEntityCfg = SceneEntityCfg("ball")):

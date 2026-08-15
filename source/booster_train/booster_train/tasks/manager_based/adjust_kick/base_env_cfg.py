@@ -1,4 +1,4 @@
-"""Isaac Lab manager-based K1 ball-kicking environment."""
+"""Private K1 base environment for the standalone adjust-kick task."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 from booster_assets import BOOSTER_ASSETS_DIR
 from booster_train.assets.robots.booster import BOOSTER_K1_CFG as ROBOT_CFG, K1_ACTION_SCALE
-from booster_train.tasks.manager_based.kick import mdp
+from booster_train.tasks.manager_based.adjust_kick import task_mdp as mdp
 
 
 @configclass
@@ -80,8 +80,8 @@ class KickSceneCfg(InteractiveSceneCfg):
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.37),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.4,
-                dynamic_friction=0.3,
+                static_friction=1.0,
+                dynamic_friction=1.0,
                 restitution=0.0,
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",
@@ -288,8 +288,8 @@ class RewardsCfg:
         func=mdp.walk_ready_after_kick,
         # Encourage a walk-compatible recovery posture after the initial
         # bracing period, without making it dominate the kick objective.
-        weight=6.0,
-        params={"return_delay": 0.25},
+        weight=3.0,
+        params={"return_delay": 0.5},
     )
     base_height = RewTerm(
         func=mdp.base_height_l2,
@@ -429,7 +429,7 @@ class EventsCfg:
         mode="reset",
         params={
             "distance_range": (4.0, 4.0),
-            "angle_range_deg": (-15.0, 15.0),
+            "angle_range_deg": (-30.0, 30.0),
         },
     )
     push_robot = EventTerm(
@@ -485,23 +485,13 @@ class K1KickPlayEnvCfg(K1KickEnvCfg):
         self.scene.num_envs = 32
         self.scene.env_spacing = 8.0
         self.events.push_robot = None
-        self.events.friction = None
-        self.events.body_mass = None
-        self.events.body_com = None
-        self.events.pd_gains = None
         self.events.reset_target.params["visualize_target"] = True
         self.events.reset_target.params["target_radius"] = 0.15
-        # Reproduce the 2026-08-05 checkpoint observation contract in Play.
-        self.observations.policy.ball_position.func = mdp.ball_pos_b
-        self.observations.policy.ball_position.params = {"ball_cfg": SceneEntityCfg("ball")}
-        self.observations.policy.ball_position.noise = Unoise(n_min=-0.01, n_max=0.01)
-        self.observations.policy.projected_gravity.noise = Unoise(n_min=-0.01, n_max=0.01)
-        self.observations.policy.base_ang_vel.noise = Unoise(n_min=-0.1, n_max=0.1)
-        self.observations.policy.joint_vel.noise = Unoise(n_min=-0.1, n_max=0.1)
-        self.scene.robot.init_state.joint_pos[".*_Ankle_Pitch"] = -0.20
+        # Keep Play ball friction aligned with training; the slight restitution
+        # remains Play-only for quick visual evaluation.
         self.scene.ball.spawn.physics_material.static_friction = 0.4
         self.scene.ball.spawn.physics_material.dynamic_friction = 0.3
-        self.scene.ball.spawn.physics_material.restitution = 0.0
+        self.scene.ball.spawn.physics_material.restitution = 0.08
 
 
 @configclass

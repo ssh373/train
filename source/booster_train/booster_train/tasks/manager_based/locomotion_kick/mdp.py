@@ -25,11 +25,13 @@ class WalkKickCommand(CommandTerm):
     def __init__(self, cfg, env):
         super().__init__(cfg, env)
         self._command = torch.zeros(self.num_envs, 8, device=self.device)
+        self.walk_command = torch.zeros(self.num_envs, 3, device=self.device)
         self.gait_process = torch.zeros(self.num_envs, device=self.device)
         self.walk_speed = torch.zeros(self.num_envs, device=self.device)
         self.kick_distance = torch.zeros(self.num_envs, device=self.device)
         self.mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.mode_time = torch.zeros(self.num_envs, device=self.device)
+        self.kick_cycles = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.robot = env.scene[cfg.asset_name]
         self.ball = env.scene["ball"]
 
@@ -40,21 +42,33 @@ class WalkKickCommand(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
-        self.walk_speed[env_ids] = torch.empty(len(env_ids), device=self.device).uniform_(
-            *self.cfg.walk_speed_range
-        )
+        self.walk_command[env_ids, 0] = torch.empty(len(env_ids), device=self.device).uniform_(*self.cfg.lin_vel_x_range)
+        self.walk_command[env_ids, 1] = torch.empty(len(env_ids), device=self.device).uniform_(*self.cfg.lin_vel_y_range)
+        self.walk_command[env_ids, 2] = torch.empty(len(env_ids), device=self.device).uniform_(*self.cfg.ang_vel_yaw_range)
         self.kick_distance[env_ids] = torch.empty(len(env_ids), device=self.device).uniform_(
             *self.cfg.kick_distance_range
         )
         self.mode[env_ids] = 0
         self.mode_time[env_ids] = 0.0
         self.gait_process[env_ids] = 0.0
+        self.kick_cycles[env_ids] = 0
 
     def _update_command(self):
         self.mode_time += self._env.step_dt
         ball_b = kick_mdp.ball_pos_b(self._env)[:, :2]
+        ball_distance = torch.norm(ball_b, dim=1)
+        target_direction = getattr(self._env, "_kick_direction_w", None)
+        if target_direction is None:
+            target_alignment = torch.ones(self.num_envs, device=self.device)
+        else:
+            quat = kick_mdp.yaw_quat(self.robot.data.root_quat_w)
+            heading = torch.zeros(self.num_envs, 2, device=self.device)
+            heading[:, 0] = 1.0
+            heading_w = kick_mdp.quat_apply(quat, torch.cat((heading, torch.zeros(self.num_envs, 1, device=self.device)), dim=1))[:, :2]
+            target_alignment = torch.sum(heading_w * target_direction, dim=1)
+        aligned_to_target = target_alignment >= math.cos(math.radians(50.0))
         enter_kick = (self.mode == 0) & (
-            ((ball_b[:, 0] < self.kick_distance) & (ball_b[:, 0] > 0.12))
+            ((ball_distance >= 0.35) & (ball_distance <= self.kick_distance) & aligned_to_target)
             | (self.mode_time > self.cfg.max_walk_time)
         )
         self.mode[enter_kick] = 1
@@ -74,14 +88,44 @@ class WalkKickCommand(CommandTerm):
         return_walk = (self.mode == 2) & (self.mode_time > self.cfg.recovery_time)
         self.mode[return_walk] = 0
         self.mode_time[return_walk] = 0.0
-        self.walk_speed[return_walk] = 0.0
+        if return_walk.any():
+            ids = torch.nonzero(return_walk, as_tuple=False).squeeze(1)
+            self.kick_cycles[ids] += 1
+            # Re-seed the next approach with a new ball and target.  The number
+            # of cycles grows with training progress: 1 -> 2 -> 3 kicks/episode.
+            progress = float(getattr(self._env, "common_step_counter", 0))
+            if progress < self.cfg.curriculum_stage_2_steps:
+                max_cycles = 1
+                ball_x, ball_bearing, target_angle = (1.2, 1.8), (-30.0, 30.0), (-15.0, 15.0)
+            elif progress < self.cfg.curriculum_stage_3_steps:
+                max_cycles = 2
+                ball_x, ball_bearing, target_angle = (1.5, 2.5), (-90.0, 90.0), (-30.0, 30.0)
+            else:
+                max_cycles = 3
+                ball_x, ball_bearing, target_angle = (1.8, 3.0), (-150.0, 150.0), (-60.0, 60.0)
+            active = ids[self.kick_cycles[ids] < max_cycles]
+            if len(active):
+                kick_mdp.reset_ball_in_front(
+                    self._env, active, x_range=ball_x, y_range=(-1.0, 1.0),
+                    angle_range_deg=ball_bearing,
+                )
+                kick_mdp.reset_kick_target(
+                    self._env, active, distance_range=(3.0, 5.0), angle_range_deg=target_angle
+                )
+            finished = ids[self.kick_cycles[ids] >= max_cycles]
+            if len(finished):
+                self.mode[finished] = 2
+                self.mode_time[finished] = 0.0
+            self.walk_command[ids, 0] = torch.empty(len(ids), device=self.device).uniform_(*self.cfg.lin_vel_x_range)
+            self.walk_command[ids, 1] = torch.empty(len(ids), device=self.device).uniform_(*self.cfg.lin_vel_y_range)
+            self.walk_command[ids, 2] = torch.empty(len(ids), device=self.device).uniform_(*self.cfg.ang_vel_yaw_range)
 
         walking = self.mode == 0
         self.gait_process = torch.fmod(
             self.gait_process + walking.float() * self._env.step_dt * self.cfg.gait_frequency, 1.0
         )
         self._command.zero_()
-        self._command[:, 0] = self.walk_speed * walking.float()
+        self._command[:, :3] = self.walk_command * walking.unsqueeze(1).float()
         self._command[:, 3] = torch.cos(2.0 * math.pi * self.gait_process)
         self._command[:, 4] = torch.sin(2.0 * math.pi * self.gait_process)
         self._command[:, 5] = (self.mode == 0).float()
@@ -96,12 +140,16 @@ class WalkKickCommand(CommandTerm):
 class WalkKickCommandCfg(CommandTermCfg):
     class_type: type = WalkKickCommand
     asset_name: str = "robot"
-    walk_speed_range: tuple[float, float] = (0.0, 1.0)
+    lin_vel_x_range: tuple[float, float] = (-1.5, 1.5)
+    lin_vel_y_range: tuple[float, float] = (-1.5, 1.5)
+    ang_vel_yaw_range: tuple[float, float] = (-1.6, 1.6)
     gait_frequency: float = 2.0
     kick_distance_range: tuple[float, float] = (0.35, 0.50)
     max_walk_time: float = 3.0
     max_kick_time: float = 3.0
     recovery_time: float = 1.0
+    curriculum_stage_2_steps: int = 150000
+    curriculum_stage_3_steps: int = 300000
 
 
 def locomotion_command(env, command_name="walk_kick"):
