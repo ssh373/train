@@ -420,7 +420,7 @@ class EventsCfg:
     reset_ball = EventTerm(
         func=mdp.reset_ball_in_front,
         mode="reset",
-        params={"x_range": (0.20, 0.35), "y_range": (-0.15, 0.15), "height": 0.105},
+        params={"x_range": (0.10, 0.35), "y_range": (-0.15, 0.0), "height": 0.105},
     )
     reset_target = EventTerm(
         func=mdp.reset_kick_target,

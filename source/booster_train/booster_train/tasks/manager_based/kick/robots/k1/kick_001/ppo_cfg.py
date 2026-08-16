@@ -13,7 +13,7 @@ class PPORunnerCfg(KickPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
-            use_data_augmentation=True,
+            use_data_augmentation=False,
             use_mirror_loss=False,
             mirror_loss_coeff=0.0,
             data_augmentation_func=data_augmentation_func,

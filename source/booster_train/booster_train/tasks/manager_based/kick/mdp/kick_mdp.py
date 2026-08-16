@@ -263,9 +263,8 @@ def reset_ball_in_front(
 
     if not hasattr(env, "_kick_preferred_foot"):
         env._kick_preferred_foot = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-    # Body-frame +y is left (index 0), -y is right (index 1).
-    side_preference = torch.where(local[:, 1] >= 0.0, 0, 1)
-    env._kick_preferred_foot[env_ids] = torch.where(local[:, 1].abs() <= 0.03, -1, side_preference)
+    # Right-foot-only task. Body index 1 is ``right_foot_link``.
+    env._kick_preferred_foot[env_ids] = 1
 
     if not hasattr(env, "_kick_ball_start_xy"):
         env._kick_ball_start_xy = torch.zeros(env.num_envs, 2, device=env.device)
@@ -506,7 +505,7 @@ def kicking_foot_approach_ball(
     ball_local_y = ball_pos_b(env, ball_cfg=ball_cfg)[:, 1]
     preferred_idx = getattr(env, "_kick_preferred_foot", torch.where(ball_local_y >= 0.0, 0, 1))
     nearest_idx = torch.argmin(distances, dim=1)
-    selected_idx = torch.where(ball_local_y.abs() <= center_deadband, nearest_idx, preferred_idx)
+    selected_idx = torch.where(preferred_idx >= 0, preferred_idx, nearest_idx)
     env_ids = torch.arange(env.num_envs, device=env.device)
     foot_pos = foot_pos_all[env_ids, selected_idx]
     foot_vel = foot_vel_all[env_ids, selected_idx]
@@ -537,7 +536,7 @@ def kicking_foot_approach_progress(
     ball_y = ball_pos_b(env, ball_cfg=ball_cfg)[:, 1]
     preferred = getattr(env, "_kick_preferred_foot", torch.where(ball_y >= 0.0, 0, 1))
     nearest = torch.argmin(distances, dim=1)
-    selected = torch.where(ball_y.abs() <= center_deadband, nearest, preferred)
+    selected = torch.where(preferred >= 0, preferred, nearest)
     current = distances[torch.arange(env.num_envs, device=env.device), selected]
 
     if not hasattr(env, "_kick_prev_selected_foot_distance"):
