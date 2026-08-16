@@ -38,14 +38,11 @@ def reset_adjust_kick_scenario(
     """Reset ball and target using a four-stage 360-degree curriculum."""
     stage = _curriculum_stage(env, stage_steps)
     distributions = (
-        # Learn the current near-ball kick and a small adjustment first.
-        ((0.25, 0.60), (-45.0, 45.0), (3.5, 4.5), (-30.0, 30.0)),
-        # Add fast approach and side-on adjustment.
-        ((0.40, 1.20), (-120.0, 120.0), (3.5, 5.5), (-90.0, 90.0)),
-        # Full bearing with medium-distance approach and arbitrary targets.
-        ((0.35, 2.00), (-180.0, 180.0), (3.5, 6.0), (-180.0, 180.0)),
-        # Final deployment distribution: near/far ball, full 360-degree geometry.
-        ((0.25, 3.00), (-180.0, 180.0), (3.0, 7.0), (-180.0, 180.0)),
+        # The ball always starts nearby and in front. Only target direction widens.
+        ((0.28, 0.45), (-8.0, 8.0), (3.5, 4.5), (-30.0, 30.0)),
+        ((0.32, 0.55), (-12.0, 12.0), (3.5, 5.5), (-90.0, 90.0)),
+        ((0.35, 0.65), (-15.0, 15.0), (3.5, 6.0), (-180.0, 180.0)),
+        ((0.30, 0.75), (-15.0, 15.0), (3.0, 7.0), (-180.0, 180.0)),
     )
     ball_distance, ball_bearing, target_distance, target_angle = distributions[stage]
     kick_mdp.reset_ball_in_front(
@@ -401,7 +398,7 @@ def adjusted_ball_success(
     env: ManagerBasedRLEnv,
     target_xy: tuple[float, float] = (4.0, 0.0),
     target_radius: float = 0.15,
-    min_direction_score: float = 0.98,
+    min_direction_score: float = 0.995,
     max_speed: float = 2.5,
     recovery_time: float = 0.8,
     max_base_speed: float = 0.35,
@@ -473,7 +470,12 @@ def walk_teacher_tracking(
         error = torch.mean(
             (action_term.student_processed_actions - action_term.teacher_target).square(), dim=1
         )
-        return torch.exp(-error / (std * std)) * action_term.frozen_walk_active.float()
+        active = getattr(
+            action_term,
+            "walk_teacher_reference_active",
+            action_term.frozen_walk_active,
+        )
+        return torch.exp(-error / (std * std)) * active.float()
 
     bundled_teacher = os.path.abspath(
         os.path.join(

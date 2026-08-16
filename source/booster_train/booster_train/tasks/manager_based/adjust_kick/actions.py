@@ -74,8 +74,13 @@ class FrozenWalkAdjustAction(JointPositionAction):
             self.num_envs, dtype=torch.bool, device=self.device
         )
         self._student_processed_actions = torch.zeros_like(self._teacher_last_action)
+        self._walk_teacher_reference_active = torch.ones(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self._gait_phase = torch.zeros(self.num_envs, device=self.device)
         self._adjust_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if not cfg.execute_walk_teacher:
+            self._adjust_latched.fill_(True)
         self._transition_elapsed = torch.zeros(self.num_envs, device=self.device)
         self._transition_active = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
@@ -120,6 +125,10 @@ class FrozenWalkAdjustAction(JointPositionAction):
     @property
     def frozen_walk_active(self) -> torch.Tensor:
         return (~self._adjust_latched) | self._transition_active
+
+    @property
+    def walk_teacher_reference_active(self) -> torch.Tensor:
+        return self._walk_teacher_reference_active
 
     @property
     def handoff_distance(self) -> torch.Tensor:
@@ -199,14 +208,20 @@ class FrozenWalkAdjustAction(JointPositionAction):
         # Keep the validated walk teacher in control until the robot is both
         # close enough and actually looking at the ball. This still supports
         # 360-degree starts: the walk teacher rotates first, then hands off.
-        enter_adjust = (
-            (robot_ball_distance <= self._handoff_distance)
-            & (face_ball_error <= math.radians(self.cfg.handoff_heading_tolerance_deg))
-        )
+        if self.cfg.execute_walk_teacher:
+            enter_adjust = (
+                (robot_ball_distance <= self._handoff_distance)
+                & (face_ball_error <= math.radians(self.cfg.handoff_heading_tolerance_deg))
+            )
+        else:
+            # Adjust-only task: the student owns control from the first step.
+            enter_adjust = torch.ones(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
         newly_handed_off = enter_adjust & ~self._adjust_latched
         self._adjust_latched |= enter_adjust
         self._transition_elapsed[newly_handed_off] = 0.0
-        if self.cfg.transition_duration_s > 0.0:
+        if self.cfg.execute_walk_teacher and self.cfg.transition_duration_s > 0.0:
             self._transition_active.copy_(
                 self._adjust_latched
                 & (self._transition_elapsed < self.cfg.transition_duration_s)
@@ -214,7 +229,19 @@ class FrozenWalkAdjustAction(JointPositionAction):
         else:
             self._transition_active.zero_()
         walk_active = ~self._adjust_latched
-        walk_needed = walk_active | self._transition_active
+        kick_happened = getattr(
+            self._env,
+            "_kick_happened",
+            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        )
+        self._walk_teacher_reference_active.copy_(
+            (~_ready_latch(self._env)) & (~kick_happened)
+        )
+        walk_needed = (
+            walk_active
+            | self._transition_active
+            | self._walk_teacher_reference_active
+        )
         if walk_needed.any():
             command = torch.zeros(self.num_envs, 3, device=self.device)
             command[:, 0] = (self.cfg.command_gain_x * error_b[:, 0]).clamp(-1.5, 1.5)
@@ -292,8 +319,9 @@ class FrozenWalkAdjustAction(JointPositionAction):
         self._kick_teacher_target[env_ids] = 0.0
         self._kick_teacher_active[env_ids] = False
         self._student_processed_actions[env_ids] = 0.0
+        self._walk_teacher_reference_active[env_ids] = True
         self._gait_phase[env_ids] = 0.0
-        self._adjust_latched[env_ids] = False
+        self._adjust_latched[env_ids] = not self.cfg.execute_walk_teacher
         self._transition_elapsed[env_ids] = 0.0
         self._transition_active[env_ids] = False
         self._sample_handoff_distance(env_ids)
@@ -318,6 +346,7 @@ class FrozenWalkAdjustActionCfg(JointPositionActionCfg):
     slowdown_distance: float = 0.90
     handoff_heading_tolerance_deg: float = 20.0
     transition_duration_s: float = 0.50
+    execute_walk_teacher: bool = True
     walk_full_speed_heading_deg: float = 15.0
     walk_stop_translation_heading_deg: float = 45.0
     command_gain_x: float = 1.4

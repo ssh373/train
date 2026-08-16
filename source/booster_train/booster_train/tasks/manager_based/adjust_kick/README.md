@@ -1,14 +1,13 @@
 # K1 autonomous adjust kick
 
-`Booster-K1-Adjust-Kick_001-v0` trains the policy used after a BT-controlled
-walk handoff: close approach, moving around the ball, precise alignment, kick,
-and recovery to a walk-ready stance. There is no walk/kick/phase observation.
+`Booster-K1-Adjust-Kick_001-v0` trains an adjust-first policy: the ball already
+starts nearby and in front, then the policy moves around it without contact,
+aligns to a 360-degree target, kicks, and recovers. Long-range approach is not
+part of this task. There is no walk/kick/phase observation.
 
-During training only, the frozen walk teacher rolls the robot into the handoff
-state. The deploy-identical frozen kick teacher also rolls in the original
-kick after precise alignment. At deployment the BT keeps using its existing walk policy, then starts
-the exported adjust-kick actor at its selected handoff distance (for example
-0.75 m). No composite walk/adjust export is required.
+The frozen walk teacher is imitation reference only; its targets are never
+applied to the robot. The deploy-identical frozen kick teacher preserves the
+original kick after precise alignment.
 
 ## Independence
 
@@ -19,7 +18,9 @@ kick model files are treated as read-only policy assets.
 
 The shared walk/adjust nominal ankle-pitch pose is `-0.20 rad`, with no hidden
 `0.05 rad` conversion between the frozen walk and learned branch. Final target
-success and target visualization use a `0.15 m` radius.
+success and target visualization use a `0.15 m` radius. Success also requires
+the travelled ball direction to stay within about `5.7 deg` of the initial
+ball-to-target vector (`cos > 0.995`).
 
 Walk, adjust, kick-teacher conversion, and recovery all use the fixed
 `-0.20 rad` ankle-pitch nominal pose. There is no kick-only ankle offset.
@@ -29,26 +30,17 @@ Walk, adjust, kick-teacher conversion, and recovery all use the fixed
 The reset curriculum uses `common_step_counter` and changes only the reset
 distribution. No curriculum-stage value is exposed to the actor.
 
-| Stage | Control steps | Ball distance | Ball bearing | Handoff distance | Ball-to-target distance | Target bearing |
-|---|---:|---:|---:|---:|---:|---:|
-| 0 | 0--99,999 | 0.25--0.60 m | -45--45 deg | 0.55--0.65 m | 3.5--4.5 m | -30--30 deg |
-| 1 | 100,000--249,999 | 0.40--1.20 m | -120--120 deg | 0.50--0.70 m | 3.5--5.5 m | -90--90 deg |
-| 2 | 250,000--499,999 | 0.35--2.00 m | full 360 deg | 0.45--0.75 m | 3.5--6.0 m | full 360 deg |
-| 3 | 500,000+ | 0.25--3.00 m | full 360 deg | 0.45--0.80 m | 3.0--7.0 m | full 360 deg |
+| Stage | Control steps | Ball distance | Ball bearing | Ball-to-target distance | Target bearing |
+|---|---:|---:|---:|---:|---:|
+| 0 | 0--99,999 | 0.28--0.45 m | -8--8 deg | 3.5--4.5 m | -30--30 deg |
+| 1 | 100,000--249,999 | 0.32--0.55 m | -12--12 deg | 3.5--5.5 m | -90--90 deg |
+| 2 | 250,000--499,999 | 0.35--0.65 m | -15--15 deg | 3.5--6.0 m | full 360 deg |
+| 3 | 500,000+ | 0.30--0.75 m | -15--15 deg | 3.0--7.0 m | full 360 deg |
 
-Stage 0 preserves the existing near-ball kick and learns a small adjustment.
-Later stages add side/back approaches and arbitrary target geometry. Play
-always uses stage 3. Training roll-in is executed by the frozen teacher. A new
-handoff distance is sampled independently for every reset, and the learned
-branch takes over when planar robot-to-ball distance crosses it, regardless of
-heading. It therefore learns the remaining close
-approach, including moving around the ball from the opposite side, precise
-alignment, kick, and recovery. This switch is latched for the rest of the
-episode.
-
-At handoff, joint targets are blended from the frozen walk teacher to the
-student with a `0.50 s` smoothstep transition. Kick-ready gating and its
-`2.5 s` no-kick timer remain disabled until this transition is complete.
+The ball remains in the robot's forward sector in every stage. The target
+bearing widens to the full 360 degrees, forcing fast contact-free movement
+around the ball. The student controls from the first simulation step; there is
+no walk roll-in, distance handoff, or walk-to-adjust transition.
 
 Kick-teacher roll-in has a separate, shorter curriculum:
 
@@ -66,11 +58,12 @@ validated shape.
 
 ## Reward intent
 
-- Fast approach: position progress `+8`, velocity toward the pre-kick pose `+3`.
+- Fast adjustment: position progress `+8`, velocity toward the pre-kick pose `+3`.
 - Fast alignment: heading progress `+5`, precise behind-ball pose `+4`.
 - Do not touch during adjustment: early ball motion `-80`, early foot proximity `-20`.
-- Accurate kick: target accuracy `+20`, immediate direction accuracy `+15`,
-  target velocity `+10`, valid foot-contact event `+8`, lateral velocity `-8`.
+- Accurate kick: target accuracy `+20` (`std=0.25 m`, matching `kick_001`),
+  immediate direction accuracy `+15`, target velocity `+10`, valid
+  foot-contact event `+8`, lateral velocity `-8`.
 - Recovery: stable recovery `+4`, walk-ready pose `+2`, both feet grounded `+8`.
 - Existing kick preservation: deploy kick teacher tracking `+4`.
 - Smoothness and safety terms from the K1 kick task remain active, including
@@ -84,10 +77,10 @@ ball speed <= 0.08 m/s, and ball displacement from reset <= 0.05 m. Kick rewards
 and the valid-kick latch are zero before this gate is reached. Ball displacement
 beyond 0.03 m remains penalized during adjustment, even after the ball stops.
 
-## Walk handoff
+## Walk reference
 
-The bundled 54-observation velocity-walk TorchScript teacher is enabled during
-training and directly supplies joint targets before the sampled handoff:
+The 54-observation velocity-walk TorchScript teacher provides imitation
+targets during adjustment but never directly controls the robot:
 
 `adjust_kick/models/walk_teacher.pt`
 
@@ -97,10 +90,8 @@ To override it with another compatible teacher, set:
 export ADJUST_KICK_WALK_TEACHER_JIT=/absolute/path/to/walk_teacher.pt
 ```
 
-The teacher is frozen. PPO actions are recorded for imitation learning during
-approach, but they are not sent to the robot until the close-adjust switch.
-Missing or incompatible teacher files stop environment startup instead of
-silently training a different walk.
+The teacher is frozen. Missing or incompatible teacher files stop environment
+startup instead of silently training a different walking style.
 
 The 49-observation kick teacher is loaded from:
 
@@ -112,10 +103,9 @@ variables are optional overrides.
 
 Deployment sequence:
 
-1. The BT commands the existing walk policy toward the ball/approach area.
-2. At the configured robot-to-ball XY distance (0.45--0.80 m is supported by the
-   final curriculum), the BT stops walk and starts the adjust-kick actor, with
-   no heading condition.
+1. The BT uses the existing walk policy until the ball is nearby and in front.
+2. At approximately `0.30--0.75 m`, the BT stops walk and starts the
+   adjust-kick actor.
 3. Initialize the actor's previous-action observation from the final walk joint
    target in adjust action coordinates: `(q_target - q_default) / action_scale`.
 4. Keep the adjust-kick actor active through kick and recovery.

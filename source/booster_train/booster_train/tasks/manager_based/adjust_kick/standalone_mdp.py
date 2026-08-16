@@ -1039,7 +1039,7 @@ def ball_success(
     env: ManagerBasedRLEnv,
     target_xy: tuple[float, float] = (4.0, 0.0),
     target_radius: float = 0.15,
-    min_direction_score: float = 0.98,
+    min_direction_score: float = 0.995,
     max_speed: float = 2.5,
     recovery_time: float = 0.8,
     max_base_speed: float = 0.35,

@@ -183,7 +183,7 @@ class RewardsCfg:
     ball_target_accuracy = RewTerm(
         func=mdp.ball_target_accuracy,
         weight=10.0,
-        params={"target_xy": (4.0, 0.0), "std": 0.4},
+        params={"target_xy": (4.0, 0.0), "std": 0.25},
     )
     ball_overspeed = RewTerm(
         func=mdp.ball_overspeed,
@@ -336,8 +336,8 @@ class TerminationsCfg:
         params={
             "target_xy": (4.0, 0.0),
             "target_radius": 0.15,
-            # cos(theta) > 0.98 corresponds to about +/-11.5 degrees.
-            "min_direction_score": 0.98,
+            # cos(theta) > 0.995 corresponds to about +/-5.7 degrees.
+            "min_direction_score": 0.995,
             "max_speed": 2.5,
             "recovery_time": 0.8,
             "max_base_speed": 0.35,

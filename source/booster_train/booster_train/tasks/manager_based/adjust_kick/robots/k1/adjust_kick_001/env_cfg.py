@@ -54,7 +54,8 @@ class ActionsCfg:
         ),
         slowdown_distance=0.90,
         handoff_heading_tolerance_deg=20.0,
-        transition_duration_s=0.50,
+        transition_duration_s=0.0,
+        execute_walk_teacher=False,
         walk_full_speed_heading_deg=15.0,
         walk_stop_translation_heading_deg=45.0,
     )
@@ -72,6 +73,8 @@ class RewardsCfg(KickRewardsCfg):
     # Kick terms are gated by geometric readiness. They cannot reward an early
     # touch while the robot is still approaching or rotating around the ball.
     ball_velocity_target = RewTerm(func=mdp.gated_kick_velocity, weight=10.0)
+    # Match kick_001's target-distance shaping while keeping a stricter final
+    # direction condition in the success termination below.
     ball_target_accuracy = RewTerm(func=mdp.gated_kick_accuracy, weight=20.0, params={"std": 0.25})
     kick_direction_accuracy = RewTerm(
         func=mdp.kick_direction_accuracy, weight=15.0, params={"minimum_speed": 0.10}
@@ -193,7 +196,8 @@ class TerminationsCfg(KickTerminationsCfg):
         params={
             "target_xy": (4.0, 0.0),
             "target_radius": 0.15,
-            "min_direction_score": 0.98,
+            # About +/-5.7 degrees from the initial ball-to-target vector.
+            "min_direction_score": 0.995,
             "max_speed": 2.5,
             "recovery_time": 0.8,
             "max_base_speed": 0.35,

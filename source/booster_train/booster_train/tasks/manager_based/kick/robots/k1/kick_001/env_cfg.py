@@ -427,7 +427,7 @@ class EventsCfg:
         mode="reset",
         params={
             "distance_range": (4.0, 4.0),
-            "angle_range_deg": (-15.0, 15.0),
+            "angle_range_deg": (-30.0, 30.0),
         },
     )
     push_robot = EventTerm(
