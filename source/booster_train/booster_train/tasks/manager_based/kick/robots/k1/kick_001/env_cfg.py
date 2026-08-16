@@ -177,22 +177,22 @@ class RewardsCfg:
 
     ball_velocity_target = RewTerm(
         func=mdp.ball_velocity_to_target,
-        weight=14.0,
+        weight=18.0,
         params={"target_xy": (4.0, 0.0), "decay_distance": 4.0, "max_reward": 10.0},
     )
     ball_target_accuracy = RewTerm(
         func=mdp.ball_target_accuracy,
         weight=10.0,
-        params={"target_xy": (4.0, 0.0), "std": 0.4},
+        params={"target_xy": (4.0, 0.0), "std": 0.25},
     )
     ball_overspeed = RewTerm(
         func=mdp.ball_overspeed,
         weight=-1.5,
-        params={"max_speed": 2.5},
+        params={"max_speed": 3.0},
     )
     ball_lateral_velocity = RewTerm(
         func=mdp.ball_lateral_velocity,
-        weight=-4.0,
+        weight=-8.0,
         params={"target_xy": (4.0, 0.0)},
     )
     kicking_foot_approach = RewTerm(

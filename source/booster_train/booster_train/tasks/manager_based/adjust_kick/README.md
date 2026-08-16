@@ -46,6 +46,10 @@ approach, including moving around the ball from the opposite side, precise
 alignment, kick, and recovery. This switch is latched for the rest of the
 episode.
 
+At handoff, joint targets are blended from the frozen walk teacher to the
+student with a `0.50 s` smoothstep transition. Kick-ready gating and its
+`2.5 s` no-kick timer remain disabled until this transition is complete.
+
 Kick-teacher roll-in has a separate, shorter curriculum:
 
 | Control steps | Approx. PPO iteration | Teacher blend |

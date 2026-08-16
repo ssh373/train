@@ -321,8 +321,10 @@ def reset_kick_target(
     env._kick_target_w[env_ids, 0] = robot.data.root_pos_w[env_ids, 0] + distance * torch.cos(world_angle)
     env._kick_target_w[env_ids, 1] = robot.data.root_pos_w[env_ids, 1] + distance * torch.sin(world_angle)
 
-    # Choose the inside-foot geometry from ball -> target, not merely ball side.
-    # A target left of the ball is struck with the right foot and vice versa.
+    # Keep the preferred foot selected from the ball's lateral position in
+    # ``reset_ball_in_front``: left-side ball -> left foot, right-side ball ->
+    # right foot.  The target direction is still stored for kick alignment,
+    # but must not overwrite the side-based foot choice.
     ball: RigidObject = env.scene[ball_cfg.name]
     direction_w = torch.zeros(count, 3, device=env.device)
     direction_w[:, :2] = env._kick_target_w[env_ids] - ball.data.root_pos_w[env_ids, :2]
@@ -331,12 +333,6 @@ def reset_kick_target(
     env._kick_direction_w[env_ids] = direction_w[:, :2] / torch.norm(
         direction_w[:, :2], dim=1, keepdim=True
     ).clamp_min(1.0e-6)
-    direction_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w[env_ids]), direction_w)
-    lateral = direction_b[:, 1]
-    preferred = torch.where(lateral > 0.03, 1, 0)
-    preferred = torch.where(lateral < -0.03, 0, preferred)
-    env._kick_preferred_foot[env_ids] = torch.where(lateral.abs() <= 0.03, -1, preferred)
-
     # SceneEntityCfg.body_ids can remain as ``slice(None)`` for this reset
     # callback, even when body_names contains only the two feet.  Resolve the
     # names explicitly so the captured stance always has shape (N, 2, 3).
@@ -870,7 +866,7 @@ def post_kick_recovery(
     base_ang = torch.sum(robot.data.root_ang_vel_b.square(), dim=1)
     tilt = torch.sum(robot.data.projected_gravity_b[:, :2].square(), dim=1)
     stability = torch.exp(
-        -4.0 * joint_error - 0.05 * joint_speed - 2.0 * base_lin - 0.5 * base_ang - 10.0 * tilt
+        -8.0 * joint_error - 0.05 * joint_speed - 2.0 * base_lin - 0.5 * base_ang - 10.0 * tilt
     )
     return stability * env._kick_happened.float()
 
@@ -889,7 +885,7 @@ def walk_ready_after_kick(
     active = kick_happened & (recovery_time >= return_delay)
     joint_error = torch.mean((robot.data.joint_pos - robot.data.default_joint_pos).square(), dim=1)
     joint_speed = torch.mean(robot.data.joint_vel.square(), dim=1)
-    readiness = torch.exp(-4.0 * joint_error - 0.05 * joint_speed)
+    readiness = torch.exp(-8.0 * joint_error - 0.05 * joint_speed)
     return readiness * active.float()
 
 

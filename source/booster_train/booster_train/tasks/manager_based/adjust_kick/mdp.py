@@ -111,6 +111,18 @@ def approach_heading_error(
     return torch.atan2(ball_b[:, 1], ball_b[:, 0])
 
 
+def facing_translation_scale(
+    heading_error: torch.Tensor,
+    full_speed_deg: float = 15.0,
+    stop_deg: float = 45.0,
+) -> torch.Tensor:
+    """Allow translation only while the ball remains near the forward axis."""
+    error_deg = torch.rad2deg(heading_error.abs())
+    return (
+        (stop_deg - error_deg) / max(stop_deg - full_speed_deg, 1.0e-6)
+    ).clamp(0.0, 1.0)
+
+
 def _ready_latch(
     env: ManagerBasedEnv,
     position_tolerance: float = 0.16,
@@ -130,6 +142,12 @@ def _ready_latch(
         & (ball_speed <= ball_speed_tolerance)
         & (ball_displacement <= 0.05)
     )
+    transition_active = getattr(
+        env,
+        "_adjust_transition_active",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    ready_now &= ~transition_active
     env._adjust_ready_latched |= ready_now
     return env._adjust_ready_latched
 
@@ -177,6 +195,39 @@ def face_ball_alignment(
         torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
     )
     return quality * (~_ready_latch(env)).float() * (~kick_happened).float()
+
+
+def face_ball_violation(
+    env: ManagerBasedRLEnv,
+    tolerance_deg: float = 20.0,
+    full_penalty_deg: float = 45.0,
+) -> torch.Tensor:
+    """Penalize turning the ball away from the robot's forward view after handoff."""
+    action_term = env.action_manager.get_term("joint_pos")
+    adjust_active = (
+        ~action_term.frozen_walk_active
+        if hasattr(action_term, "frozen_walk_active")
+        else torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    error_deg = torch.rad2deg(approach_heading_error(env).abs())
+    violation = (
+        (error_deg - tolerance_deg)
+        / max(full_penalty_deg - tolerance_deg, 1.0e-6)
+    ).clamp(0.0, 1.0)
+    return violation * adjust_active.float() * (~_ready_latch(env)).float()
+
+
+def lost_ball_heading(
+    env: ManagerBasedRLEnv,
+    max_heading_error_deg: float = 45.0,
+) -> torch.Tensor:
+    """Terminate adjustment if the robot turns the ball outside its forward view."""
+    action_term = env.action_manager.get_term("joint_pos")
+    if not hasattr(action_term, "frozen_walk_active"):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    adjust_active = ~action_term.frozen_walk_active
+    heading_lost = approach_heading_error(env).abs() > math.radians(max_heading_error_deg)
+    return adjust_active & (~_ready_latch(env)) & heading_lost
 
 
 def fast_approach_velocity(env: ManagerBasedRLEnv, target_speed: float = 1.2) -> torch.Tensor:
@@ -465,6 +516,7 @@ def walk_teacher_tracking(
         command[:, 1] = (1.8 * error_b[:, 1]).clamp(-1.2, 1.2)
         command_heading = approach_heading_error(env)
         command[:, 2] = (2.5 * command_heading).clamp(-1.6, 1.6)
+        command[:, :2] *= facing_translation_scale(command_heading).unsqueeze(1)
         close = distance < 0.45
         command[close, :2] *= (distance[close] / 0.45).unsqueeze(1)
         active = ~_ready_latch(env)

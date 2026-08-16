@@ -53,6 +53,10 @@ class ActionsCfg:
             (0.45, 0.80),
         ),
         slowdown_distance=0.90,
+        handoff_heading_tolerance_deg=20.0,
+        transition_duration_s=0.50,
+        walk_full_speed_heading_deg=15.0,
+        walk_stop_translation_heading_deg=45.0,
     )
 
 
@@ -111,8 +115,13 @@ class RewardsCfg(KickRewardsCfg):
     adjust_heading_progress = RewTerm(func=mdp.adjust_heading_progress, weight=5.0)
     face_ball_alignment = RewTerm(
         func=mdp.face_ball_alignment,
-        weight=4.0,
-        params={"heading_std_deg": 20.0},
+        weight=8.0,
+        params={"heading_std_deg": 15.0},
+    )
+    face_ball_violation = RewTerm(
+        func=mdp.face_ball_violation,
+        weight=-12.0,
+        params={"tolerance_deg": 20.0, "full_penalty_deg": 45.0},
     )
     fast_approach_velocity = RewTerm(
         func=mdp.fast_approach_velocity, weight=3.0, params={"target_speed": 1.2}
@@ -201,6 +210,10 @@ class TerminationsCfg(KickTerminationsCfg):
             "min_direction_cos": 0.9396926208,
             "ball_cfg": SceneEntityCfg("ball"),
         },
+    )
+    lost_ball_heading = DoneTerm(
+        func=mdp.lost_ball_heading,
+        params={"max_heading_error_deg": 45.0},
     )
 
 
