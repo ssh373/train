@@ -305,8 +305,6 @@ def reset_ball_in_front(
         env._kick_prev_selected_foot_distance[env_ids] = torch.nan
     if hasattr(env, "_kick_prev_ball_speed_for_foot"):
         env._kick_prev_ball_speed_for_foot[env_ids] = 0.0
-    if hasattr(env, "_kick_prev_ball_speed_inside"):
-        env._kick_prev_ball_speed_inside[env_ids] = 0.0
     if hasattr(env, "_kick_valid_foot_kick"):
         env._kick_valid_foot_kick[env_ids] = False
     if hasattr(env, "_kick_directional_happened"):
@@ -630,10 +628,14 @@ def kicking_foot_approach_progress(
 def preferred_foot_kick_event(
     env: ManagerBasedRLEnv,
     speed_increase_threshold: float = 0.08,
+    max_contact_distance: float = 0.25,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "contact_forces", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
+    ),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """Return +1 for a preferred-foot kick event and -1 for a wrong-foot event."""
+    """Score preferred-foot contact and latch a grounded, foot-surface-agnostic kick."""
     robot: Articulation = env.scene[asset_cfg.name]
     ball: RigidObject = env.scene[ball_cfg.name]
     speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
@@ -645,10 +647,28 @@ def preferred_foot_kick_event(
     event = speed_increase > speed_increase_threshold
 
     feet = robot.data.body_pos_w[:, asset_cfg.body_ids]
-    actual_foot = torch.argmin(torch.norm(feet - ball.data.root_pos_w[:, None, :], dim=2), dim=1)
+    distances = torch.norm(feet - ball.data.root_pos_w[:, None, :], dim=2)
+    actual_foot = torch.argmin(distances, dim=1)
+    ids = torch.arange(env.num_envs, device=env.device)
+    actual_distance = distances[ids, actual_foot]
     ball_y = ball_pos_b(env, ball_cfg=ball_cfg)[:, 1]
     preferred = getattr(env, "_kick_preferred_foot", torch.where(ball_y >= 0.0, 0, 1))
     correct = (preferred < 0) | (actual_foot == preferred)
+
+    support = 1 - actual_foot.clamp(0, 1)
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    support_grounded = contacts[ids, support]
+    valid_event = event & correct & (actual_distance < max_contact_distance) & support_grounded
+    if not hasattr(env, "_kick_valid_foot_kick"):
+        env._kick_valid_foot_kick = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env._kick_valid_foot_kick |= valid_event
+
     signed = torch.where(correct, torch.ones_like(speed), -torch.ones_like(speed))
     return signed * event.float()
 
@@ -670,159 +690,6 @@ def wrong_foot_proximity(
     distance = torch.norm(feet[torch.arange(env.num_envs, device=env.device), wrong] - ball.data.root_pos_w, dim=1)
     stationary = (torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1) < 0.1).float()
     return torch.exp(-distance / proximity_std) * stationary * has_preference.float()
-
-
-def inside_foot_kick_quality(
-    env: ManagerBasedRLEnv,
-    speed_increase_threshold: float = 0.08,
-    max_contact_distance: float = 0.25,
-    minimum_inside_score: float = 0.20,
-    ideal_contact_distance: float = 0.15,
-    contact_distance_std: float = 0.035,
-    full_reward_angle_deg: float = 10.0,
-    zero_reward_angle_deg: float = 20.0,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg(
-        "contact_forces", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
-    ),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-) -> torch.Tensor:
-    """Score the inferred contact as an inside-foot kick at the kick event.
-
-    Left-foot medial normal is local -y and right-foot medial normal is local +y.
-    A high-quality event has the ball on that medial side, the medial normal aimed
-    toward the target, and the foot velocity moving toward the target.
-    """
-    robot: Articulation = env.scene[asset_cfg.name]
-    ball: RigidObject = env.scene[ball_cfg.name]
-    feet_pos = robot.data.body_pos_w[:, asset_cfg.body_ids]
-    feet_quat = robot.data.body_quat_w[:, asset_cfg.body_ids]
-    feet_vel = robot.data.body_lin_vel_w[:, asset_cfg.body_ids]
-
-    ball_y = ball_pos_b(env, ball_cfg=ball_cfg)[:, 1]
-    preferred = getattr(env, "_kick_preferred_foot", torch.where(ball_y >= 0.0, 0, 1))
-    distances = torch.norm(feet_pos - ball.data.root_pos_w[:, None, :], dim=2)
-    nearest = torch.argmin(distances, dim=1)
-    selected = torch.where(preferred >= 0, preferred, nearest)
-    ids = torch.arange(env.num_envs, device=env.device)
-    support = 1 - selected.clamp(0, 1)
-    foot_pos = feet_pos[ids, selected]
-    foot_quat = feet_quat[ids, selected]
-    foot_vel = feet_vel[ids, selected]
-    distance = distances[ids, selected]
-
-    medial_local = torch.zeros(env.num_envs, 3, device=env.device)
-    medial_local[:, 1] = torch.where(selected == 0, -1.0, 1.0)
-    medial_w = quat_apply(foot_quat, medial_local)
-    medial_xy = medial_w[:, :2]
-    medial_xy = medial_xy / torch.norm(medial_xy, dim=1, keepdim=True).clamp_min(1.0e-6)
-
-    to_ball = ball.data.root_pos_w[:, :2] - foot_pos[:, :2]
-    to_ball = to_ball / torch.norm(to_ball, dim=1, keepdim=True).clamp_min(1.0e-6)
-    # Use the direction latched at reset instead of recomputing from a moving
-    # ball every frame.  This keeps the swing direction stable under ball,
-    # target, and base motion.
-    if hasattr(env, "_kick_direction_w"):
-        target_dir = env._kick_direction_w
-    else:
-        target_dir = _kick_target_w(env, (4.0, 0.0)) - ball.data.root_pos_w[:, :2]
-        target_dir = target_dir / torch.norm(target_dir, dim=1, keepdim=True).clamp_min(1.0e-6)
-    foot_speed = torch.norm(foot_vel[:, :2], dim=1)
-    foot_dir = foot_vel[:, :2] / foot_speed.unsqueeze(1).clamp_min(1.0e-6)
-
-    ball_on_inside = torch.sum(medial_xy * to_ball, dim=1).clamp(0.0, 1.0)
-    medial_alignment = torch.sum(medial_xy * target_dir, dim=1).clamp(-1.0, 1.0)
-    cos_full = torch.cos(torch.tensor(full_reward_angle_deg * torch.pi / 180.0, device=env.device))
-    cos_zero = torch.cos(torch.tensor(zero_reward_angle_deg * torch.pi / 180.0, device=env.device))
-    # Full reward inside 10 degrees, smooth rapid decay to zero at 20 degrees.
-    face_to_target = ((medial_alignment - cos_zero) / (cos_full - cos_zero)).clamp(0.0, 1.0)
-    face_to_target = face_to_target.square()
-    swing_to_target = torch.sum(foot_dir * target_dir, dim=1).clamp(0.0, 1.0)
-    # The medial axis should remain close to horizontal.  This discourages a
-    # rolled/pitched toe contact that happens to have a similar XY projection.
-    medial_level = (1.0 - medial_w[:, 2].abs() / 0.35).clamp(0.0, 1.0)
-    contact_distance_quality = torch.exp(
-        -(distance - ideal_contact_distance).square() / (contact_distance_std * contact_distance_std)
-    )
-    quality = ball_on_inside * face_to_target * swing_to_target * medial_level * contact_distance_quality
-    quality *= (distance < max_contact_distance).float()
-
-    ball_speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
-    if not hasattr(env, "_kick_prev_ball_speed_inside"):
-        env._kick_prev_ball_speed_inside = ball_speed.detach().clone()
-        return torch.zeros_like(ball_speed)
-    kick_event = (ball_speed - env._kick_prev_ball_speed_inside) > speed_increase_threshold
-    env._kick_prev_ball_speed_inside.copy_(ball_speed)
-    contact_sensor = env.scene.sensors[sensor_cfg.name]
-    contacts = (
-        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
-        .norm(dim=-1)
-        .max(dim=1)[0]
-        > 1.0
-    )
-    support_grounded = contacts[ids, support]
-    quality *= support_grounded.float()
-    if not hasattr(env, "_kick_valid_foot_kick"):
-        env._kick_valid_foot_kick = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    inside_contact = ball_on_inside >= minimum_inside_score
-    selected_is_nearest = selected == nearest
-    env._kick_valid_foot_kick |= (
-        kick_event
-        & (distance < max_contact_distance)
-        & support_grounded
-        & inside_contact
-        & selected_is_nearest
-    )
-
-    # Range [-1, 1]: a poor/non-inside kick is penalized at the event.
-    return (2.0 * quality - 1.0) * kick_event.float()
-
-
-def inside_foot_preparation(
-    env: ManagerBasedRLEnv,
-    full_reward_angle_deg: float = 10.0,
-    zero_reward_angle_deg: float = 35.0,
-    max_distance: float = 0.40,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
-    ),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-) -> torch.Tensor:
-    """Reward presenting the medial foot toward the target before contact."""
-    robot: Articulation = env.scene[asset_cfg.name]
-    ball: RigidObject = env.scene[ball_cfg.name]
-    feet_pos = robot.data.body_pos_w[:, asset_cfg.body_ids]
-    feet_quat = robot.data.body_quat_w[:, asset_cfg.body_ids]
-    distances = torch.norm(feet_pos - ball.data.root_pos_w[:, None, :], dim=2)
-    preferred = getattr(
-        env, "_kick_preferred_foot",
-        torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device),
-    )
-    nearest = torch.argmin(distances, dim=1)
-    selected = torch.where(preferred >= 0, preferred, nearest)
-    ids = torch.arange(env.num_envs, device=env.device)
-    foot_pos = feet_pos[ids, selected]
-    foot_quat = feet_quat[ids, selected]
-    distance = distances[ids, selected]
-
-    medial_local = torch.zeros(env.num_envs, 3, device=env.device)
-    medial_local[:, 1] = torch.where(selected == 0, -1.0, 1.0)
-    medial_w = quat_apply(foot_quat, medial_local)
-    medial_xy = medial_w[:, :2]
-    medial_xy = medial_xy / torch.norm(medial_xy, dim=1, keepdim=True).clamp_min(1.0e-6)
-    target_dir = getattr(env, "_kick_direction_w", torch.zeros_like(medial_xy))
-    to_ball = ball.data.root_pos_w[:, :2] - foot_pos[:, :2]
-    to_ball = to_ball / torch.norm(to_ball, dim=1, keepdim=True).clamp_min(1.0e-6)
-
-    ball_on_inside = torch.sum(medial_xy * to_ball, dim=1).clamp(0.0, 1.0)
-    alignment = torch.sum(medial_xy * target_dir, dim=1).clamp(-1.0, 1.0)
-    cos_full = torch.cos(torch.tensor(full_reward_angle_deg * torch.pi / 180.0, device=env.device))
-    cos_zero = torch.cos(torch.tensor(zero_reward_angle_deg * torch.pi / 180.0, device=env.device))
-    face_to_target = ((alignment - cos_zero) / (cos_full - cos_zero)).clamp(0.0, 1.0).square()
-    medial_level = (1.0 - medial_w[:, 2].abs() / 0.35).clamp(0.0, 1.0)
-    proximity = (1.0 - distance / max_distance).clamp(0.0, 1.0)
-    before_kick = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1) < 0.15
-    return ball_on_inside * face_to_target * medial_level * proximity * before_kick.float()
 
 
 def pre_kick_crouch(

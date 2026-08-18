@@ -597,8 +597,167 @@ def low_foot_drag_penalty(
         torch.relu(foot_speed - speed_deadband) / speed_scale
     ).square()
     drag_cost = torch.mean(low_height_gate * moving_cost, dim=1)
-    active = (alignment_position_error(env) > alignment_gate_error).float()
+    active = (
+        (alignment_position_error(env) > alignment_gate_error)
+        | (~_final_feet_stance_ready(env, asset_cfg=asset_cfg))
+    ).float()
     return active * drag_cost.clamp(max=maximum_penalty)
+
+
+def _feet_stance_metrics(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return foot-midpoint, fore/aft spread and lateral spacing in root yaw."""
+
+    robot = env.scene[asset_cfg.name]
+    delta_w = robot.data.body_pos_w[:, asset_cfg.body_ids] - robot.data.root_pos_w[:, None, :]
+    root_yaw = yaw_quat(robot.data.root_quat_w)[:, None, :].expand(-1, len(asset_cfg.body_ids), -1)
+    feet_b = quat_apply_inverse(
+        root_yaw.reshape(-1, 4), delta_w.reshape(-1, 3)
+    ).reshape(env.num_envs, len(asset_cfg.body_ids), 3)
+    midpoint_error = torch.linalg.vector_norm(feet_b[:, :, :2].mean(dim=1), dim=1)
+    longitudinal_spread = torch.abs(feet_b[:, 0, 0] - feet_b[:, 1, 0])
+    lateral_spacing = torch.abs(feet_b[:, 0, 1] - feet_b[:, 1, 1])
+    return midpoint_error, longitudinal_spread, lateral_spacing
+
+
+def _final_feet_stance_ready(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    midpoint_tolerance: float = 0.10,
+    longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
+) -> torch.Tensor:
+    midpoint_error, longitudinal_spread, lateral_spacing = _feet_stance_metrics(env, asset_cfg)
+    return (
+        (midpoint_error <= midpoint_tolerance)
+        & (longitudinal_spread <= longitudinal_spread_tolerance)
+        & (lateral_spacing >= minimum_lateral_spacing)
+        & (lateral_spacing <= maximum_lateral_spacing)
+    )
+
+
+def final_feet_stance_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    alignment_scale: float = 0.10,
+    midpoint_scale: float = 0.10,
+    longitudinal_scale: float = 0.12,
+    target_lateral_spacing: float = 0.22,
+    lateral_scale: float = 0.08,
+) -> torch.Tensor:
+    """Bring both feet into a compact kick-ready stance near the final base pose."""
+
+    midpoint_error, longitudinal_spread, lateral_spacing = _feet_stance_metrics(env, asset_cfg)
+    stance_error = (
+        (midpoint_error / midpoint_scale).square()
+        + (longitudinal_spread / longitudinal_scale).square()
+        + ((lateral_spacing - target_lateral_spacing) / lateral_scale).square()
+    )
+    near_goal = torch.exp(-((alignment_position_error(env) / alignment_scale).square()))
+    return near_goal * torch.exp(-stance_error)
+
+
+def _support_transfer_active(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    alignment_gate_error: float,
+    midpoint_tolerance: float,
+    longitudinal_spread_tolerance: float,
+    minimum_lateral_spacing: float,
+    maximum_lateral_spacing: float,
+) -> torch.Tensor:
+    base_not_arrived = alignment_position_error(env) > alignment_gate_error
+    feet_not_arrived = ~_final_feet_stance_ready(
+        env,
+        asset_cfg=asset_cfg,
+        midpoint_tolerance=midpoint_tolerance,
+        longitudinal_spread_tolerance=longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
+    )
+    return (base_not_arrived | feet_not_arrived).float()
+
+
+def support_transfer_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    minimum_air_time: float = 0.10,
+    maximum_air_time: float = 0.45,
+    alignment_gate_error: float = 0.08,
+    midpoint_tolerance: float = 0.10,
+    longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
+) -> torch.Tensor:
+    """Reward releasing the old support foot and completing the next placement.
+
+    This is contact-event based and has no clock or gait phase.  It remains
+    active while either the base or the two-foot stance has not arrived, then
+    turns off completely so the final pose can remain still.
+    """
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    air_time = sensor.data.current_air_time[:, sensor_cfg.body_ids]
+    in_contact = contact_time > 0.0
+    single_support = in_contact.sum(dim=1) == 1
+    swing_air_time = torch.where(~in_contact, air_time, torch.zeros_like(air_time)).max(dim=1).values
+    useful_swing = (
+        single_support
+        & (swing_air_time >= minimum_air_time)
+        & (swing_air_time <= maximum_air_time)
+    ).float()
+
+    touchdown = sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids]
+    touchdown_quality = (
+        (sensor.data.last_air_time[:, sensor_cfg.body_ids] / minimum_air_time)
+        .clamp(0.0, 1.0)
+        .mul(touchdown.float())
+        .sum(dim=1)
+        .clamp(max=1.0)
+    )
+    active = _support_transfer_active(
+        env,
+        asset_cfg=asset_cfg,
+        alignment_gate_error=alignment_gate_error,
+        midpoint_tolerance=midpoint_tolerance,
+        longitudinal_spread_tolerance=longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
+    )
+    return active * (0.35 * useful_swing + 0.65 * touchdown_quality)
+
+
+def prolonged_support_contact_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    maximum_contact_time: float = 0.40,
+    alignment_gate_error: float = 0.08,
+    midpoint_tolerance: float = 0.10,
+    longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
+) -> torch.Tensor:
+    """Penalize keeping the same support foot planted while travel remains."""
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    excess_contact = torch.relu(contact_time - maximum_contact_time).sum(dim=1)
+    active = _support_transfer_active(
+        env,
+        asset_cfg=asset_cfg,
+        alignment_gate_error=alignment_gate_error,
+        midpoint_tolerance=midpoint_tolerance,
+        longitudinal_spread_tolerance=longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
+    )
+    return active * excess_contact
 
 
 def adjust_foot_clearance(
@@ -774,11 +933,16 @@ def feet_ball_proximity_penalty(
 def _alignment_ready(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
+    feet_cfg: SceneEntityCfg,
     position_tolerance: float = 0.06,
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
     contact_threshold: float = 1.0,
+    feet_midpoint_tolerance: float = 0.10,
+    feet_longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
     ball_speed_tolerance: float = 0.05,
     ball_displacement_tolerance: float = 0.02,
 ) -> torch.Tensor:
@@ -796,20 +960,33 @@ def _alignment_ready(
         torch.linalg.vector_norm(robot.data.root_lin_vel_b[:, :2], dim=1)
         <= linear_speed_tolerance
     ) & (torch.abs(robot.data.root_ang_vel_b[:, 2]) <= yaw_speed_tolerance)
+    feet_ready = _final_feet_stance_ready(
+        env,
+        asset_cfg=feet_cfg,
+        midpoint_tolerance=feet_midpoint_tolerance,
+        longitudinal_spread_tolerance=feet_longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
+    )
     ball_ready = (ball_speed(env) <= ball_speed_tolerance) & (
         ball_displacement(env) <= ball_displacement_tolerance
     )
-    return position_ready & heading_ready & motion_ready & grounded & ball_ready
+    return position_ready & heading_ready & motion_ready & feet_ready & grounded & ball_ready
 
 
 def alignment_ready_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
+    feet_cfg: SceneEntityCfg,
     position_tolerance: float = 0.06,
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
     contact_threshold: float = 1.0,
+    feet_midpoint_tolerance: float = 0.10,
+    feet_longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
     ball_speed_tolerance: float = 0.05,
     ball_displacement_tolerance: float = 0.02,
 ) -> torch.Tensor:
@@ -818,11 +995,16 @@ def alignment_ready_reward(
     return _alignment_ready(
         env,
         sensor_cfg=sensor_cfg,
+        feet_cfg=feet_cfg,
         position_tolerance=position_tolerance,
         heading_tolerance_deg=heading_tolerance_deg,
         linear_speed_tolerance=linear_speed_tolerance,
         yaw_speed_tolerance=yaw_speed_tolerance,
         contact_threshold=contact_threshold,
+        feet_midpoint_tolerance=feet_midpoint_tolerance,
+        feet_longitudinal_spread_tolerance=feet_longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
         ball_speed_tolerance=ball_speed_tolerance,
         ball_displacement_tolerance=ball_displacement_tolerance,
     ).float()
@@ -831,11 +1013,16 @@ def alignment_ready_reward(
 def alignment_success(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
+    feet_cfg: SceneEntityCfg,
     position_tolerance: float = 0.06,
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
     contact_threshold: float = 1.0,
+    feet_midpoint_tolerance: float = 0.10,
+    feet_longitudinal_spread_tolerance: float = 0.12,
+    minimum_lateral_spacing: float = 0.14,
+    maximum_lateral_spacing: float = 0.30,
     ball_speed_tolerance: float = 0.05,
     ball_displacement_tolerance: float = 0.02,
     stable_time: float = 1.50,
@@ -843,11 +1030,16 @@ def alignment_success(
     ready = _alignment_ready(
         env,
         sensor_cfg=sensor_cfg,
+        feet_cfg=feet_cfg,
         position_tolerance=position_tolerance,
         heading_tolerance_deg=heading_tolerance_deg,
         linear_speed_tolerance=linear_speed_tolerance,
         yaw_speed_tolerance=yaw_speed_tolerance,
         contact_threshold=contact_threshold,
+        feet_midpoint_tolerance=feet_midpoint_tolerance,
+        feet_longitudinal_spread_tolerance=feet_longitudinal_spread_tolerance,
+        minimum_lateral_spacing=minimum_lateral_spacing,
+        maximum_lateral_spacing=maximum_lateral_spacing,
         ball_speed_tolerance=ball_speed_tolerance,
         ball_displacement_tolerance=ball_displacement_tolerance,
     )

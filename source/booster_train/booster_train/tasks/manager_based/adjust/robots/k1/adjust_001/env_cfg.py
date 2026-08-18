@@ -108,11 +108,16 @@ class RewardsCfg:
         weight=2.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "feet_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "position_tolerance": 0.06,
             "heading_tolerance_deg": 15.0,
             "linear_speed_tolerance": 0.10,
             "yaw_speed_tolerance": 0.10,
             "contact_threshold": 1.0,
+            "feet_midpoint_tolerance": 0.10,
+            "feet_longitudinal_spread_tolerance": 0.12,
+            "minimum_lateral_spacing": 0.14,
+            "maximum_lateral_spacing": 0.30,
             "ball_speed_tolerance": 0.05,
             "ball_displacement_tolerance": 0.02,
         },
@@ -149,6 +154,47 @@ class RewardsCfg:
             "speed_scale": 0.15,
             "alignment_gate_error": 0.08,
             "maximum_penalty": 4.0,
+        },
+    )
+    support_transfer = RewTerm(
+        func=mdp.support_transfer_reward,
+        weight=1.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "minimum_air_time": 0.10,
+            "maximum_air_time": 0.45,
+            "alignment_gate_error": 0.08,
+            "midpoint_tolerance": 0.10,
+            "longitudinal_spread_tolerance": 0.12,
+            "minimum_lateral_spacing": 0.14,
+            "maximum_lateral_spacing": 0.30,
+        },
+    )
+    prolonged_support = RewTerm(
+        func=mdp.prolonged_support_contact_penalty,
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "maximum_contact_time": 0.40,
+            "alignment_gate_error": 0.08,
+            "midpoint_tolerance": 0.10,
+            "longitudinal_spread_tolerance": 0.12,
+            "minimum_lateral_spacing": 0.14,
+            "maximum_lateral_spacing": 0.30,
+        },
+    )
+    final_feet_stance = RewTerm(
+        func=mdp.final_feet_stance_reward,
+        weight=1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "alignment_scale": 0.10,
+            "midpoint_scale": 0.10,
+            "longitudinal_scale": 0.12,
+            "target_lateral_spacing": 0.22,
+            "lateral_scale": 0.08,
         },
     )
     feet_spacing = RewTerm(
@@ -244,11 +290,16 @@ class TerminationsCfg:
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces", body_names=FEET, preserve_order=True
             ),
+            "feet_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "position_tolerance": 0.06,
             "heading_tolerance_deg": 15.0,
             "linear_speed_tolerance": 0.10,
             "yaw_speed_tolerance": 0.10,
             "contact_threshold": 1.0,
+            "feet_midpoint_tolerance": 0.10,
+            "feet_longitudinal_spread_tolerance": 0.12,
+            "minimum_lateral_spacing": 0.14,
+            "maximum_lateral_spacing": 0.30,
             "ball_speed_tolerance": 0.05,
             "ball_displacement_tolerance": 0.02,
             "stable_time": 1.50,

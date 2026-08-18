@@ -249,20 +249,7 @@ class RewardsCfg:
                 preserve_order=True,
             ),
             "speed_increase_threshold": 0.08,
-        },
-    )
-    inside_foot_kick = RewTerm(
-        func=mdp.inside_foot_kick_quality,
-        weight=8.0,
-        params={
-            "asset_cfg": SceneEntityCfg(
-                "robot",
-                body_names=["left_foot_link", "right_foot_link"],
-                preserve_order=True,
-            ),
-            "speed_increase_threshold": 0.08,
             "max_contact_distance": 0.25,
-            "minimum_inside_score": 0.20,
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
