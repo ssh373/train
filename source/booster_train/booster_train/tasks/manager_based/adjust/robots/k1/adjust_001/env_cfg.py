@@ -29,6 +29,7 @@ from booster_train.tasks.manager_based.kick.robots.k1.kick_001.env_cfg import (
 
 
 FEET = ["left_foot_link", "right_foot_link"]
+LEGS = [".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"]
 
 
 @configclass
@@ -96,31 +97,29 @@ class ObservationsCfg:
 class RewardsCfg:
     survival = RewTerm(func=mdp.survival, weight=0.05)
 
-    # The main objective is to reach a ball-relative target point quickly.
-    alignment_position = RewTerm(
-        func=mdp.alignment_position_reward,
+    # GoTo-style unified pose objective: exact position and ball-facing yaw.
+    alignment_pose = RewTerm(
+        func=mdp.alignment_pose_reward,
         weight=6.0,
-        params={"std": 0.10},
+        params={"heading_radius": 0.28, "gain": 8.0},
     )
-    heading_target = RewTerm(
-        func=mdp.heading_target_reward,
+    alignment_ready = RewTerm(
+        func=mdp.alignment_ready_reward,
         weight=2.0,
-        params={"std_deg": 15.0},
-    )
-    alignment_progress = RewTerm(
-        func=mdp.alignment_position_progress,
-        weight=8.0,
-        params={"max_progress_per_step": 0.04},
-    )
-    step_efficiency = RewTerm(
-        func=mdp.step_progress_efficiency_reward,
-        weight=3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
-            "target_progress_per_step": 0.18,
-            "maximum_progress_per_step": 0.30,
+            "position_tolerance": 0.06,
+            "heading_tolerance_deg": 15.0,
+            "linear_speed_tolerance": 0.10,
+            "yaw_speed_tolerance": 0.10,
+            "contact_threshold": 1.0,
+            "ball_speed_tolerance": 0.05,
+            "ball_displacement_tolerance": 0.02,
         },
     )
+
+    # Adjust-specific route constraints: circle around the ball rather than
+    # taking the Euclidean shortcut through it.
     orbit_tangent = RewTerm(
         func=mdp.orbit_tangent_velocity_reward,
         weight=2.0,
@@ -131,35 +130,38 @@ class RewardsCfg:
         weight=1.5,
         params={"target_radius": 0.28, "radius_std": 0.08},
     )
-    walking_quality = RewTerm(
-        func=mdp.adjust_walking_quality,
-        weight=2.5,
+    approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.15)
+    arrival_stillness = RewTerm(
+        func=mdp.alignment_stillness_penalty,
+        weight=-0.75,
+        params={"alignment_scale": 0.10, "yaw_weight": 1.0},
+    )
+
+    # Retain only a light direct anti-drag guard.  Normal walking should now
+    # emerge from the GoTo posture/contact structure rather than gait timing.
+    low_foot_drag = RewTerm(
+        func=mdp.low_foot_drag_penalty,
+        weight=-0.5,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
-            "target_air_time": 0.18,
-            "air_time_std": 0.10,
-            "target_clearance": 0.055,
-            "clearance_std": 0.025,
-            "swing_speed_scale": 0.15,
-            "minimum_swing_height": 0.035,
+            "drag_height": 0.045,
+            "speed_deadband": 0.03,
+            "speed_scale": 0.15,
             "alignment_gate_error": 0.08,
+            "maximum_penalty": 4.0,
         },
     )
-    moving_stance_width = RewTerm(
-        func=mdp.adjust_feet_lateral_spacing_penalty,
-        weight=-0.8,
+    feet_spacing = RewTerm(
+        func=mdp.adjust_feet_lateral_spacing_l2,
+        weight=-0.3,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
-            "minimum_spacing": 0.20,
-            "maximum_spacing": 0.32,
-            "lower_violation_scale": 0.08,
-            "upper_violation_scale": 0.05,
+            "target_spacing": 0.22,
         },
     )
     lower_leg_alignment = RewTerm(
         func=mdp.lower_leg_forward_alignment_penalty,
-        weight=-1.0,
+        weight=-0.25,
         params={
             "feet_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "ankle_roll_cfg": SceneEntityCfg(
@@ -172,15 +174,8 @@ class RewardsCfg:
             "ankle_roll_weight": 0.5,
         },
     )
-    approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.25)
-    arrival_stillness = RewTerm(
-        func=mdp.alignment_stillness_penalty,
-        weight=-0.40,
-        params={"alignment_scale": 0.10, "yaw_weight": 0.25},
-    )
 
-    # Contact-free alignment is a hard requirement, not just a small shaping
-    # preference.  Termination below also catches meaningful ball motion.
+    # Contact-free ball handling remains task-specific and strict.
     ball_motion = RewTerm(
         func=mdp.ball_motion_penalty,
         weight=-12.0,
@@ -195,32 +190,39 @@ class RewardsCfg:
         },
     )
 
-    # Keep the base and joint behavior compatible with kick_001's action
-    # contract while allowing translational movement.
-    base_height = RewTerm(
-        func=mdp.adjust_dynamic_base_height_l2,
-        weight=-200.0,
-        params={
-            "arrival_height": 0.55,
-            "travel_height_drop": 0.03,
-            "upright_error": 0.06,
-            "full_drop_error": 0.12,
-        },
+    # GoTo locomotion regularization.  These are deliberately much lighter
+    # than the previous shaping so lifting a leg is not more expensive than
+    # dragging it.
+    nominal_pose = RewTerm(
+        func=mdp.joint_deviation_l1,
+        weight=-0.05,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)},
     )
-    orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-20.0)
-    lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.5)
-    ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.1)
-    joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-4)
-    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-3.0e-4)
-    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+    orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.5)
+    ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
+    joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-1.0e-4)
+    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
+    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
     feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-2.5,
+        weight=-0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET),
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
+        },
+    )
+    undesired_contact = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=[r"^(?!left_foot_link$)(?!right_foot_link$).+$"],
+            ),
+            "threshold": 1.0,
         },
     )
 
@@ -239,8 +241,14 @@ class TerminationsCfg:
     alignment_success = DoneTerm(
         func=mdp.alignment_success,
         params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces", body_names=FEET, preserve_order=True
+            ),
             "position_tolerance": 0.06,
             "heading_tolerance_deg": 15.0,
+            "linear_speed_tolerance": 0.10,
+            "yaw_speed_tolerance": 0.10,
+            "contact_threshold": 1.0,
             "ball_speed_tolerance": 0.05,
             "ball_displacement_tolerance": 0.02,
             "stable_time": 1.50,

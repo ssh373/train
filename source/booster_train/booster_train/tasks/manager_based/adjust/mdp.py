@@ -337,6 +337,26 @@ def heading_target_reward(
     return torch.exp(-error.square() / (std * std))
 
 
+def alignment_pose_reward(
+    env: ManagerBasedRLEnv,
+    heading_radius: float = 0.28,
+    gain: float = 8.0,
+) -> torch.Tensor:
+    """GoTo-style unified SE(2) reward for the pre-kick pose.
+
+    Position and ball-facing heading are optimized as one geometric objective
+    instead of competing dense terms.  ``heading_radius`` converts heading
+    error to the equivalent displacement on the 0.28 m ball orbit.
+    """
+
+    position_error = alignment_position_error(env)
+    heading_error = heading_target_error(env)
+    geometry = position_error.square() + 2.0 * heading_radius**2 * (
+        1.0 - torch.cos(heading_error)
+    )
+    return torch.exp(-gain * geometry)
+
+
 def alignment_position_progress(
     env: ManagerBasedRLEnv,
     max_progress_per_step: float = 0.04,
@@ -545,6 +565,42 @@ def adjust_walking_quality(
     return active * support_quality
 
 
+def low_foot_drag_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    drag_height: float = 0.045,
+    speed_deadband: float = 0.03,
+    speed_scale: float = 0.15,
+    alignment_gate_error: float = 0.08,
+    maximum_penalty: float = 4.0,
+) -> torch.Tensor:
+    """Penalize horizontal foot motion before the foot has cleared the floor.
+
+    The regular contact-based slide term can miss toe skimming and weak
+    grazing contacts.  This term is deliberately contact-independent: while
+    travelling, any foot moving horizontally below ``drag_height`` pays a
+    quadratic cost.  The policy can avoid it by lifting first, moving the foot
+    through swing, and only then placing it down.
+    """
+
+    robot = env.scene[asset_cfg.name]
+    foot_ids = asset_cfg.body_ids
+    foot_height = (
+        robot.data.body_pos_w[:, foot_ids, 2]
+        - env.scene.env_origins[:, 2].unsqueeze(1)
+    )
+    foot_speed = torch.linalg.vector_norm(
+        robot.data.body_lin_vel_w[:, foot_ids, :2], dim=2
+    )
+    low_height_gate = ((drag_height - foot_height) / drag_height).clamp(0.0, 1.0)
+    moving_cost = (
+        torch.relu(foot_speed - speed_deadband) / speed_scale
+    ).square()
+    drag_cost = torch.mean(low_height_gate * moving_cost, dim=1)
+    active = (alignment_position_error(env) > alignment_gate_error).float()
+    return active * drag_cost.clamp(max=maximum_penalty)
+
+
 def adjust_foot_clearance(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
@@ -588,6 +644,21 @@ def adjust_feet_lateral_spacing_penalty(
     lower_violation = torch.relu(minimum_spacing - width) / lower_violation_scale
     upper_violation = torch.relu(width - maximum_spacing) / upper_violation_scale
     return (lower_violation.square() + upper_violation.square()) * _adjust_gait_gate(env)
+
+
+def adjust_feet_lateral_spacing_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    target_spacing: float = 0.22,
+) -> torch.Tensor:
+    """GoTo-style nominal lateral foot spacing in the trunk yaw frame."""
+
+    robot = env.scene[asset_cfg.name]
+    feet_w = robot.data.body_pos_w[:, asset_cfg.body_ids, :2]
+    delta_w = feet_w[:, 0] - feet_w[:, 1]
+    yaw = robot.data.heading_w
+    lateral_spacing = -torch.sin(yaw) * delta_w[:, 0] + torch.cos(yaw) * delta_w[:, 1]
+    return (lateral_spacing - target_spacing).square()
 
 
 def lower_leg_forward_alignment_penalty(
@@ -700,20 +771,86 @@ def feet_ball_proximity_penalty(
     return ((safe_distance - distance).clamp_min(0.0) / safe_distance).square()
 
 
-def alignment_success(
+def _alignment_ready(
     env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
     position_tolerance: float = 0.06,
     heading_tolerance_deg: float = 15.0,
+    linear_speed_tolerance: float = 0.10,
+    yaw_speed_tolerance: float = 0.10,
+    contact_threshold: float = 1.0,
+    ball_speed_tolerance: float = 0.05,
+    ball_displacement_tolerance: float = 0.02,
+) -> torch.Tensor:
+    robot = env.scene["robot"]
+    sensor = env.scene.sensors[sensor_cfg.name]
+    forces = sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids]
+    grounded = torch.all(
+        torch.max(torch.linalg.vector_norm(forces, dim=-1), dim=1).values
+        > contact_threshold,
+        dim=1,
+    )
+    position_ready = alignment_position_error(env) <= position_tolerance
+    heading_ready = heading_target_error(env) <= math.radians(heading_tolerance_deg)
+    motion_ready = (
+        torch.linalg.vector_norm(robot.data.root_lin_vel_b[:, :2], dim=1)
+        <= linear_speed_tolerance
+    ) & (torch.abs(robot.data.root_ang_vel_b[:, 2]) <= yaw_speed_tolerance)
+    ball_ready = (ball_speed(env) <= ball_speed_tolerance) & (
+        ball_displacement(env) <= ball_displacement_tolerance
+    )
+    return position_ready & heading_ready & motion_ready & grounded & ball_ready
+
+
+def alignment_ready_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    position_tolerance: float = 0.06,
+    heading_tolerance_deg: float = 15.0,
+    linear_speed_tolerance: float = 0.10,
+    yaw_speed_tolerance: float = 0.10,
+    contact_threshold: float = 1.0,
+    ball_speed_tolerance: float = 0.05,
+    ball_displacement_tolerance: float = 0.02,
+) -> torch.Tensor:
+    """Reward a genuinely kick-ready, grounded and stationary arrival."""
+
+    return _alignment_ready(
+        env,
+        sensor_cfg=sensor_cfg,
+        position_tolerance=position_tolerance,
+        heading_tolerance_deg=heading_tolerance_deg,
+        linear_speed_tolerance=linear_speed_tolerance,
+        yaw_speed_tolerance=yaw_speed_tolerance,
+        contact_threshold=contact_threshold,
+        ball_speed_tolerance=ball_speed_tolerance,
+        ball_displacement_tolerance=ball_displacement_tolerance,
+    ).float()
+
+
+def alignment_success(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    position_tolerance: float = 0.06,
+    heading_tolerance_deg: float = 15.0,
+    linear_speed_tolerance: float = 0.10,
+    yaw_speed_tolerance: float = 0.10,
+    contact_threshold: float = 1.0,
     ball_speed_tolerance: float = 0.05,
     ball_displacement_tolerance: float = 0.02,
     stable_time: float = 1.50,
 ) -> torch.Tensor:
-    position_ready = alignment_position_error(env) <= position_tolerance
-    heading_ready = heading_target_error(env) <= math.radians(heading_tolerance_deg)
-    ball_ready = (ball_speed(env) <= ball_speed_tolerance) & (
-        ball_displacement(env) <= ball_displacement_tolerance
+    ready = _alignment_ready(
+        env,
+        sensor_cfg=sensor_cfg,
+        position_tolerance=position_tolerance,
+        heading_tolerance_deg=heading_tolerance_deg,
+        linear_speed_tolerance=linear_speed_tolerance,
+        yaw_speed_tolerance=yaw_speed_tolerance,
+        contact_threshold=contact_threshold,
+        ball_speed_tolerance=ball_speed_tolerance,
+        ball_displacement_tolerance=ball_displacement_tolerance,
     )
-    ready = position_ready & heading_ready & ball_ready
     if not hasattr(env, "_adjust_stable_time"):
         env._adjust_stable_time = torch.zeros(env.num_envs, device=env.device)
         env._adjust_alignment_achieved = torch.zeros(

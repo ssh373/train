@@ -500,13 +500,15 @@ def kick_direction_accuracy(
     minimum_speed: float = 0.05,
     full_reward_angle_deg: float = 5.0,
     zero_reward_angle_deg: float = 15.0,
+    max_penalty_angle_deg: float = 30.0,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
     """Sharply reward ball velocity aligned with the fixed desired launch direction.
 
     Alignment inside ``full_reward_angle_deg`` receives full reward.  The reward
-    then falls quadratically to zero at ``zero_reward_angle_deg``.  Kicks with a
-    component opposite to the desired direction remain negative.
+    then falls quadratically to zero at ``zero_reward_angle_deg``.  Beyond that
+    angle the score becomes increasingly negative, reaching -1 at
+    ``max_penalty_angle_deg``.
     """
     ball: RigidObject = env.scene[ball_cfg.name]
     target_w = _kick_target_w(env, target_xy)
@@ -521,15 +523,21 @@ def kick_direction_accuracy(
 
     full_angle = math.radians(full_reward_angle_deg)
     zero_angle = math.radians(zero_reward_angle_deg)
-    if not 0.0 <= full_angle < zero_angle <= math.pi:
+    max_penalty_angle = math.radians(max_penalty_angle_deg)
+    if not 0.0 <= full_angle < zero_angle < max_penalty_angle <= math.pi:
         raise ValueError(
-            "Expected 0 <= full_reward_angle_deg < zero_reward_angle_deg <= 180, "
-            f"got {full_reward_angle_deg} and {zero_reward_angle_deg}."
+            "Expected 0 <= full_reward_angle_deg < zero_reward_angle_deg "
+            "< max_penalty_angle_deg <= 180, got "
+            f"{full_reward_angle_deg}, {zero_reward_angle_deg}, and {max_penalty_angle_deg}."
         )
     full_cos = math.cos(full_angle)
     zero_cos = math.cos(zero_angle)
     precision = ((direction_cos - zero_cos) / (full_cos - zero_cos)).clamp(0.0, 1.0).square()
-    direction_score = torch.where(direction_cos < 0.0, direction_cos, precision)
+    angle_error = torch.acos(direction_cos)
+    wrong_direction_penalty = -(
+        (angle_error - zero_angle) / (max_penalty_angle - zero_angle)
+    ).clamp(0.0, 1.0)
+    direction_score = torch.where(angle_error <= zero_angle, precision, wrong_direction_penalty)
     valid_kick = getattr(
         env, "_kick_valid_foot_kick",
         torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
@@ -668,6 +676,7 @@ def inside_foot_kick_quality(
     env: ManagerBasedRLEnv,
     speed_increase_threshold: float = 0.08,
     max_contact_distance: float = 0.25,
+    minimum_inside_score: float = 0.20,
     ideal_contact_distance: float = 0.15,
     contact_distance_std: float = 0.035,
     full_reward_angle_deg: float = 10.0,
@@ -755,8 +764,14 @@ def inside_foot_kick_quality(
     quality *= support_grounded.float()
     if not hasattr(env, "_kick_valid_foot_kick"):
         env._kick_valid_foot_kick = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    inside_contact = ball_on_inside >= minimum_inside_score
+    selected_is_nearest = selected == nearest
     env._kick_valid_foot_kick |= (
-        kick_event & (distance < max_contact_distance) & support_grounded
+        kick_event
+        & (distance < max_contact_distance)
+        & support_grounded
+        & inside_contact
+        & selected_is_nearest
     )
 
     # Range [-1, 1]: a poor/non-inside kick is penalized at the event.

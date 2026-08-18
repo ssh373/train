@@ -198,6 +198,7 @@ class RewardsCfg:
             "minimum_speed": 0.20,
             "full_reward_angle_deg": 5.0,
             "zero_reward_angle_deg": 15.0,
+            "max_penalty_angle_deg": 30.0,
         },
     )
     ball_overspeed = RewTerm(
@@ -261,6 +262,7 @@ class RewardsCfg:
             ),
             "speed_increase_threshold": 0.08,
             "max_contact_distance": 0.25,
+            "minimum_inside_score": 0.20,
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
                 body_names=["left_foot_link", "right_foot_link"],
