@@ -190,7 +190,8 @@ class RewardsCfg:
     kick_direction_accuracy = RewTerm(
         func=mdp.kick_direction_accuracy,
         weight=20.0,
-        params={"target_xy": (4.0, 0.0), "minimum_speed": 0.05},
+        # Do not let tiny/noisy ball motion dominate the direction objective.
+        params={"target_xy": (4.0, 0.0), "minimum_speed": 0.20},
     )
     ball_overspeed = RewTerm(
         func=mdp.ball_overspeed,
@@ -288,13 +289,24 @@ class RewardsCfg:
     post_kick_recovery = RewTerm(
         func=mdp.post_kick_recovery,
         # Keep the robot upright and quiet after the ball has been kicked.
-        weight=6.0,
+        weight=12.0,
         params={"kick_speed_threshold": 0.2},
     )
     walk_ready_after_kick = RewTerm(
         func=mdp.walk_ready_after_kick,
-        weight=3.0,
+        weight=6.0,
         params={"return_delay": 0.5},
+    )
+    post_kick_feet_grounded = RewTerm(
+        func=mdp.post_kick_feet_grounded,
+        # Explicitly bring both feet back to the pre-kick ground stance.
+        weight=4.0,
+        params={
+            "return_delay": 0.25,
+            "asset_cfg": SceneEntityCfg(
+                "robot", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
+            ),
+        },
     )
     base_height = RewTerm(
         func=mdp.base_height_l2,
@@ -307,7 +319,8 @@ class RewardsCfg:
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-4)
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-3.0e-4)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1.5)
+    # A strong action-rate penalty fights the fast post-kick recovery motion.
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.75)
     joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
     feet_slide = RewTerm(
         func=mdp.feet_slide,

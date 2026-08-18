@@ -1069,10 +1069,25 @@ def ball_success(
         & kick_happened
     )
 
-    # Goal arrival is independent from the robot's recovery posture.  Recovery
-    # starts as soon as ``_kick_happened`` is latched and is trained by
-    # ``walk_ready_after_kick`` while the ball continues toward the target.
-    return env._kick_target_achieved
+    # A kick only succeeds after the ball reaches the target and the robot has
+    # actually recovered.  The target latch is kept so the ball does not need
+    # to remain inside the target radius while the robot settles.
+    recovery_elapsed = getattr(
+        env, "_kick_recovery_time", torch.zeros(env.num_envs, device=env.device)
+    )
+    base_speed = torch.norm(robot.data.root_lin_vel_b[:, :2], dim=1)
+    tilt = torch.norm(robot.data.projected_gravity_b[:, :2], dim=1)
+    mean_joint_deviation = torch.mean(
+        torch.abs(robot.data.joint_pos - robot.data.default_joint_pos), dim=1
+    )
+    recovery_ready = (
+        kick_happened
+        & (recovery_elapsed >= recovery_time)
+        & (base_speed <= max_base_speed)
+        & (tilt <= max_tilt)
+        & (mean_joint_deviation <= max_mean_joint_deviation)
+    )
+    return env._kick_target_achieved & recovery_ready
 
 
 def ball_too_far(env: ManagerBasedEnv, max_distance: float, ball_cfg: SceneEntityCfg = SceneEntityCfg("ball")):

@@ -100,7 +100,7 @@ class RewardsCfg:
     alignment_position = RewTerm(
         func=mdp.alignment_position_reward,
         weight=6.0,
-        params={"std": 0.12},
+        params={"std": 0.10},
     )
     heading_target = RewTerm(
         func=mdp.heading_target_reward,
@@ -121,6 +121,37 @@ class RewardsCfg:
         func=mdp.orbit_radius_reward,
         weight=1.5,
         params={"target_radius": 0.28, "radius_std": 0.08},
+    )
+    feet_air_time = RewTerm(
+        func=mdp.adjust_feet_air_time,
+        weight=2.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "target_air_time": 0.18,
+            "air_time_std": 0.10,
+            "max_air_time": 0.45,
+            "minimum_swing_height": 0.025,
+        },
+    )
+    foot_clearance = RewTerm(
+        func=mdp.adjust_foot_clearance,
+        weight=1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "target_height": 0.045,
+            "height_std": 0.025,
+        },
+    )
+    moving_stance_width = RewTerm(
+        func=mdp.adjust_feet_lateral_spacing_penalty,
+        weight=-0.8,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "minimum_spacing": 0.20,
+            "violation_scale": 0.08,
+        },
     )
     approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.20)
 
@@ -153,7 +184,7 @@ class RewardsCfg:
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-2.0e-4)
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-3.0e-4)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1.5)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
     feet_slide = RewTerm(
         func=mdp.feet_slide,
@@ -163,7 +194,7 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
         },
     )
-    body_twist = RewTerm(func=mdp.body_twist, weight=-5.0)
+    body_twist = RewTerm(func=mdp.body_twist, weight=-0.02)
 
 
 @configclass

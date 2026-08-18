@@ -74,15 +74,22 @@ def target_direction_b(env: ManagerBasedEnv) -> torch.Tensor:
 
 
 def heading_target_error(env: ManagerBasedEnv) -> torch.Tensor:
-    """Absolute robot-yaw error to the ball-to-target direction."""
+    """Absolute robot-yaw error to the ball-facing direction.
+
+    During adjustment the robot should keep looking at the ball while it
+    walks around it.  The kick direction is still used to compute the final
+    alignment line, but it is not the heading target for the approach phase.
+    """
 
     robot = env.scene["robot"]
     forward_local = torch.zeros(env.num_envs, 3, device=env.device)
     forward_local[:, 0] = 1.0
     forward_w = quat_apply(yaw_quat(robot.data.root_quat_w), forward_local)[:, :2]
-    target_w = _target_direction_w(env)
-    dot = torch.sum(forward_w * target_w, dim=1).clamp(-1.0, 1.0)
-    cross = forward_w[:, 0] * target_w[:, 1] - forward_w[:, 1] * target_w[:, 0]
+    ball = env.scene["ball"]
+    ball_direction_w = ball.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2]
+    ball_direction_w = ball_direction_w / torch.norm(ball_direction_w, dim=1, keepdim=True).clamp_min(1.0e-6)
+    dot = torch.sum(forward_w * ball_direction_w, dim=1).clamp(-1.0, 1.0)
+    cross = forward_w[:, 0] * ball_direction_w[:, 1] - forward_w[:, 1] * ball_direction_w[:, 0]
     return torch.atan2(cross.abs(), dot)
 
 
@@ -284,26 +291,15 @@ def reset_adjust_scenario(
 
 def alignment_line_band_error(
     env: ManagerBasedRLEnv,
-    minimum_distance: float = 0.15,
-    maximum_distance: float = 0.35,
+    target_radius: float = 0.28,
 ) -> torch.Tensor:
-    """Distance to the target->ball line segment behind the ball."""
+    """Distance to the exact kick-entry point behind the ball."""
 
     robot = env.scene["robot"]
     ball = env.scene["ball"]
     direction_w = _target_direction_w(env)
-    robot_from_ball = robot.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2]
-    behind_distance = torch.sum(robot_from_ball * (-direction_w), dim=1)
-    lateral_distance = torch.abs(
-        robot_from_ball[:, 0] * direction_w[:, 1]
-        - robot_from_ball[:, 1] * direction_w[:, 0]
-    )
-    distance_band_error = torch.where(
-        behind_distance < minimum_distance,
-        minimum_distance - behind_distance,
-        (behind_distance - maximum_distance).clamp_min(0.0),
-    )
-    return torch.sqrt(lateral_distance.square() + distance_band_error.square())
+    alignment_point_w = ball.data.root_pos_w[:, :2] - target_radius * direction_w
+    return torch.linalg.vector_norm(robot.data.root_pos_w[:, :2] - alignment_point_w, dim=1)
 
 
 def alignment_line_band_error_obs(env: ManagerBasedEnv) -> torch.Tensor:
@@ -328,7 +324,7 @@ def heading_target_reward(
     env: ManagerBasedRLEnv,
     std_deg: float = 15.0,
 ) -> torch.Tensor:
-    """Reward the robot body facing the ball-to-target direction."""
+    """Reward the robot body facing the ball during adjustment."""
 
     std = math.radians(std_deg)
     error = heading_target_error(env)
@@ -401,6 +397,99 @@ def orbit_radius_reward(
         robot.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2], dim=1
     )
     return torch.exp(-((radius - target_radius) / radius_std).square())
+
+
+def _adjust_gait_gate(
+    env: ManagerBasedRLEnv,
+    error_threshold: float = 0.08,
+    speed_threshold: float = 0.03,
+) -> torch.Tensor:
+    """Enable walking-specific rewards only while the robot is travelling."""
+
+    robot = env.scene["robot"]
+    moving = torch.linalg.vector_norm(robot.data.root_lin_vel_b[:, :2], dim=1) > speed_threshold
+    not_aligned = alignment_position_error(env) > error_threshold
+    return (moving | not_aligned).float()
+
+
+def adjust_feet_air_time(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    target_air_time: float = 0.18,
+    air_time_std: float = 0.10,
+    max_air_time: float = 0.45,
+    minimum_swing_height: float = 0.025,
+) -> torch.Tensor:
+    """Reward alternating single-support steps instead of base-only leaning.
+
+    A reward is provided when exactly one foot supports the robot and the
+    other foot has been in swing for a useful amount of time.  Touchdown gets
+    an additional reward, which makes the policy complete a step rather than
+    simply holding one foot in the air.
+    """
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    robot = env.scene[asset_cfg.name]
+    body_ids = sensor_cfg.body_ids
+    foot_ids = asset_cfg.body_ids
+    contact_time = sensor.data.current_contact_time[:, body_ids]
+    air_time = sensor.data.current_air_time[:, body_ids]
+    in_contact = contact_time > 0.0
+    foot_height = robot.data.body_pos_w[:, foot_ids, 2] - env.scene.env_origins[:, 2].unsqueeze(1)
+    in_swing = (~in_contact) & (foot_height > minimum_swing_height)
+    single_support = (in_contact.sum(dim=1) == 1) & (in_swing.sum(dim=1) == 1)
+    swing_time = torch.where(in_swing, air_time, torch.zeros_like(air_time)).max(dim=1).values
+    swing_progress = (swing_time / target_air_time).clamp(0.0, 1.0)
+    swing_reward = swing_progress * (swing_time <= max_air_time).float() * single_support.float()
+
+    touchdown = sensor.compute_first_contact(env.step_dt)[:, body_ids]
+    last_air_time = sensor.data.last_air_time[:, body_ids]
+    touchdown_reward = torch.exp(-((last_air_time - target_air_time) / air_time_std).square())
+    touchdown_reward = (touchdown_reward * touchdown.float()).sum(dim=1).clamp(max=1.0)
+
+    return _adjust_gait_gate(env) * (0.7 * swing_reward + 0.3 * touchdown_reward)
+
+
+def adjust_foot_clearance(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    target_height: float = 0.045,
+    height_std: float = 0.025,
+) -> torch.Tensor:
+    """Reward a moving foot clearing the ground by roughly 4--5 cm."""
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    robot = env.scene[asset_cfg.name]
+    body_ids = sensor_cfg.body_ids
+    foot_ids = asset_cfg.body_ids
+    in_swing = sensor.data.current_air_time[:, body_ids] > 0.0
+    foot_height = robot.data.body_pos_w[:, foot_ids, 2] - env.scene.env_origins[:, 2].unsqueeze(1)
+    clearance = torch.exp(-((foot_height - target_height) / height_std).square())
+    return _adjust_gait_gate(env).unsqueeze(1).mul(clearance * in_swing.float()).sum(dim=1).clamp(max=1.0)
+
+
+def adjust_feet_lateral_spacing_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    minimum_spacing: float = 0.20,
+    violation_scale: float = 0.08,
+) -> torch.Tensor:
+    """Penalize only an overly narrow moving stance.
+
+    There is deliberately no upper-width target.  The policy may choose a
+    wider stance when it improves balance or keeps the feet away from the
+    ball; only foot crossing/narrowing below the safe minimum is penalized.
+    """
+
+    robot = env.scene[asset_cfg.name]
+    foot_pos_w = robot.data.body_pos_w[:, asset_cfg.body_ids, :2]
+    delta_w = foot_pos_w[:, 0] - foot_pos_w[:, 1]
+    yaw = robot.data.heading_w
+    lateral_spacing = -torch.sin(yaw) * delta_w[:, 0] + torch.cos(yaw) * delta_w[:, 1]
+    width_violation = torch.relu(minimum_spacing - torch.abs(lateral_spacing))
+    return (width_violation / violation_scale).square() * _adjust_gait_gate(env)
 
 
 def alignment_time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
