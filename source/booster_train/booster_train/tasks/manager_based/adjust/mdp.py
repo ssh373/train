@@ -153,11 +153,12 @@ def reset_adjust_scenario(
     ball_x_range: tuple[float, float],
     ball_y_range: tuple[float, float],
     target_distance_range: tuple[float, float],
-    target_angle_ranges_deg: tuple[tuple[float, float], ...],
+    target_angle_magnitude_ranges_deg: tuple[tuple[float, float], ...],
     visualize_target: bool = False,
     # common_step_counter values corresponding to PPO iterations
-    # 2,000, 5,000, and 10,000 when num_steps_per_env is 24.
-    stage_steps: tuple[int, ...] = (48_000, 120_000, 240_000),
+    # 2,000, 5,000, 8,000, and 10,000 PPO iterations when
+    # num_steps_per_env is 24.
+    stage_steps: tuple[int, ...] = (48_000, 120_000, 192_000, 240_000),
     curriculum_stage: int = -1,
     ball_height: float = 0.105,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -165,10 +166,9 @@ def reset_adjust_scenario(
 ) -> None:
     """Reset a front ball and a curriculum-sampled 360-degree target.
 
-    The desired robot state is a ball-relative line segment rather than a
-    sampled point: behind the ball along the target direction, 0.15--0.35 m
-    from the ball. The ball itself is always sampled at positive robot-frame x,
-    so the first observation is always a front-ball scenario.
+    The desired robot state is the exact point 0.28 m behind the ball along
+    the target direction.  Early curriculum stages sample a non-zero absolute
+    target angle so standing still is not a useful shortcut.
     """
 
     robot = _robot(env, robot_cfg)
@@ -176,7 +176,7 @@ def reset_adjust_scenario(
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     count = len(env_ids)
-    stage = _stage_index(env, stage_steps, len(target_angle_ranges_deg), curriculum_stage)
+    stage = _stage_index(env, stage_steps, len(target_angle_magnitude_ranges_deg), curriculum_stage)
 
     local = torch.zeros(count, 3, device=env.device)
     local[:, 0] = torch.empty(count, device=env.device).uniform_(*ball_x_range)
@@ -202,8 +202,14 @@ def reset_adjust_scenario(
         env._adjust_ball_start_xy = torch.zeros(env.num_envs, 2, device=env.device)
     env._adjust_ball_start_xy[env_ids] = pose[:, :2]
 
-    relative_angle = torch.empty(count, device=env.device).uniform_(*target_angle_ranges_deg[stage])
-    relative_angle = relative_angle * math.pi / 180.0
+    min_magnitude, max_magnitude = target_angle_magnitude_ranges_deg[stage]
+    angle_magnitude = torch.empty(count, device=env.device).uniform_(min_magnitude, max_magnitude)
+    angle_sign = torch.where(
+        torch.rand(count, device=env.device) < 0.5,
+        -torch.ones(count, device=env.device),
+        torch.ones(count, device=env.device),
+    )
+    relative_angle = angle_sign * angle_magnitude * math.pi / 180.0
     initial_yaw = torch.atan2(2.0 * robot_yaw[:, 0] * robot_yaw[:, 3], 1.0 - 2.0 * robot_yaw[:, 3].square())
     target_angle = initial_yaw + relative_angle
     target_distance = torch.empty(count, device=env.device).uniform_(*target_distance_range)
@@ -346,6 +352,38 @@ def alignment_position_progress(
     return (progress / max_progress_per_step).clamp(-1.0, 1.0)
 
 
+def step_progress_efficiency_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    target_progress_per_step: float = 0.12,
+    maximum_progress_per_step: float = 0.24,
+) -> torch.Tensor:
+    """Reward large useful target progress per completed foot placement.
+
+    Squaring normalized progress makes two productive large steps worth more
+    than many small steps covering the same distance.  There is no direct step
+    count penalty, so the term does not reward standing still or dragging both
+    feet; the existing slide penalty handles the latter.
+    """
+
+    current_error = alignment_position_error(env)
+    if not hasattr(env, "_adjust_last_touchdown_error"):
+        env._adjust_last_touchdown_error = current_error.detach().clone()
+        return torch.zeros_like(current_error)
+
+    last_error = env._adjust_last_touchdown_error
+    reset = env.episode_length_buf <= 1
+    last_error[reset] = current_error[reset]
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    touchdown = sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids].any(dim=1)
+    progress = (last_error - current_error).clamp(0.0, maximum_progress_per_step)
+    efficiency = (progress / target_progress_per_step).clamp(0.0, 1.0).square()
+    reward = efficiency * touchdown.float()
+    last_error[touchdown] = current_error[touchdown]
+    return reward
+
+
 def orbit_tangent_velocity_reward(
     env: ManagerBasedRLEnv,
     speed_scale: float = 0.25,
@@ -451,6 +489,58 @@ def adjust_feet_air_time(
     return _adjust_gait_gate(env) * (0.7 * swing_reward + 0.3 * touchdown_reward)
 
 
+def adjust_walking_quality(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg,
+    target_air_time: float = 0.18,
+    air_time_std: float = 0.10,
+    target_clearance: float = 0.045,
+    clearance_std: float = 0.025,
+    swing_speed_scale: float = 0.15,
+    minimum_swing_height: float = 0.025,
+    alignment_gate_error: float = 0.08,
+) -> torch.Tensor:
+    """Evaluate the complete moving gait state with one dense term.
+
+    The term covers support alternation, swing duration, swing-foot clearance,
+    and horizontal foot motion together.  It does not depend on a special
+    first-lift event, and it is disabled once the robot is already at the
+    alignment point so the policy can settle there.
+    """
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+    robot = env.scene[asset_cfg.name]
+    sensor_ids = sensor_cfg.body_ids
+    foot_ids = asset_cfg.body_ids
+
+    contact_time = sensor.data.current_contact_time[:, sensor_ids]
+    air_time = sensor.data.current_air_time[:, sensor_ids]
+    in_contact = contact_time > 0.0
+    foot_height = robot.data.body_pos_w[:, foot_ids, 2] - env.scene.env_origins[:, 2].unsqueeze(1)
+    in_swing = (~in_contact) & (foot_height > minimum_swing_height)
+
+    single_support = (in_contact.sum(dim=1) == 1) & (in_swing.sum(dim=1) == 1)
+    swing_time = torch.where(in_swing, air_time, torch.zeros_like(air_time)).max(dim=1).values
+    air_quality = torch.exp(-((swing_time - target_air_time) / air_time_std).square())
+    clearance_quality = torch.exp(
+        -((foot_height - target_clearance) / clearance_std).square()
+    )
+    clearance_quality = torch.where(in_swing, clearance_quality, torch.zeros_like(clearance_quality))
+    clearance_quality = clearance_quality.max(dim=1).values
+
+    foot_speed = torch.linalg.vector_norm(robot.data.body_lin_vel_w[:, foot_ids, :2], dim=2)
+    swing_speed_quality = torch.tanh(
+        torch.where(in_swing, foot_speed, torch.zeros_like(foot_speed)).max(dim=1).values
+        / swing_speed_scale
+    )
+    support_quality = single_support.float() * (
+        0.35 * air_quality + 0.40 * clearance_quality + 0.25 * swing_speed_quality
+    )
+    active = (alignment_position_error(env) > alignment_gate_error).float()
+    return active * support_quality
+
+
 def adjust_foot_clearance(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
@@ -474,13 +564,15 @@ def adjust_feet_lateral_spacing_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
     minimum_spacing: float = 0.20,
-    violation_scale: float = 0.08,
+    maximum_spacing: float = 0.32,
+    lower_violation_scale: float = 0.08,
+    upper_violation_scale: float = 0.05,
 ) -> torch.Tensor:
-    """Penalize only an overly narrow moving stance.
+    """Softly keep the moving stance inside a wide, usable interval.
 
-    There is deliberately no upper-width target.  The policy may choose a
-    wider stance when it improves balance or keeps the feet away from the
-    ball; only foot crossing/narrowing below the safe minimum is penalized.
+    This is not a hard action limit.  The policy may leave the interval when
+    that is useful, but very narrow or excessively splayed stances receive a
+    growing penalty.
     """
 
     robot = env.scene[asset_cfg.name]
@@ -488,8 +580,25 @@ def adjust_feet_lateral_spacing_penalty(
     delta_w = foot_pos_w[:, 0] - foot_pos_w[:, 1]
     yaw = robot.data.heading_w
     lateral_spacing = -torch.sin(yaw) * delta_w[:, 0] + torch.cos(yaw) * delta_w[:, 1]
-    width_violation = torch.relu(minimum_spacing - torch.abs(lateral_spacing))
-    return (width_violation / violation_scale).square() * _adjust_gait_gate(env)
+    width = torch.abs(lateral_spacing)
+    lower_violation = torch.relu(minimum_spacing - width) / lower_violation_scale
+    upper_violation = torch.relu(width - maximum_spacing) / upper_violation_scale
+    return (lower_violation.square() + upper_violation.square()) * _adjust_gait_gate(env)
+
+
+def alignment_stillness_penalty(
+    env: ManagerBasedRLEnv,
+    alignment_scale: float = 0.10,
+    yaw_weight: float = 0.25,
+) -> torch.Tensor:
+    """Penalize residual base motion only inside the final alignment region."""
+
+    robot = env.scene["robot"]
+    error = alignment_position_error(env)
+    near_goal = torch.exp(-((error / alignment_scale).square()))
+    planar_speed = torch.sum(robot.data.root_lin_vel_b[:, :2].square(), dim=1)
+    yaw_speed = robot.data.root_ang_vel_b[:, 2].square()
+    return near_goal * (planar_speed + yaw_weight * yaw_speed)
 
 
 def alignment_time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:

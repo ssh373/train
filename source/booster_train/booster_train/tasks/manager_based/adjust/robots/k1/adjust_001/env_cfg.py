@@ -109,8 +109,17 @@ class RewardsCfg:
     )
     alignment_progress = RewTerm(
         func=mdp.alignment_position_progress,
-        weight=12.0,
+        weight=8.0,
         params={"max_progress_per_step": 0.04},
+    )
+    step_efficiency = RewTerm(
+        func=mdp.step_progress_efficiency_reward,
+        weight=3.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
+            "target_progress_per_step": 0.12,
+            "maximum_progress_per_step": 0.24,
+        },
     )
     orbit_tangent = RewTerm(
         func=mdp.orbit_tangent_velocity_reward,
@@ -122,26 +131,19 @@ class RewardsCfg:
         weight=1.5,
         params={"target_radius": 0.28, "radius_std": 0.08},
     )
-    feet_air_time = RewTerm(
-        func=mdp.adjust_feet_air_time,
+    walking_quality = RewTerm(
+        func=mdp.adjust_walking_quality,
         weight=2.5,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "target_air_time": 0.18,
             "air_time_std": 0.10,
-            "max_air_time": 0.45,
+            "target_clearance": 0.045,
+            "clearance_std": 0.025,
+            "swing_speed_scale": 0.15,
             "minimum_swing_height": 0.025,
-        },
-    )
-    foot_clearance = RewTerm(
-        func=mdp.adjust_foot_clearance,
-        weight=1.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
-            "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
-            "target_height": 0.045,
-            "height_std": 0.025,
+            "alignment_gate_error": 0.08,
         },
     )
     moving_stance_width = RewTerm(
@@ -150,10 +152,17 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "minimum_spacing": 0.20,
-            "violation_scale": 0.08,
+            "maximum_spacing": 0.32,
+            "lower_violation_scale": 0.08,
+            "upper_violation_scale": 0.05,
         },
     )
-    approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.20)
+    approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.25)
+    arrival_stillness = RewTerm(
+        func=mdp.alignment_stillness_penalty,
+        weight=-0.40,
+        params={"alignment_scale": 0.10, "yaw_weight": 0.25},
+    )
 
     # Contact-free alignment is a hard requirement, not just a small shaping
     # preference.  Termination below also catches meaningful ball motion.
@@ -194,7 +203,6 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET),
         },
     )
-    body_twist = RewTerm(func=mdp.body_twist, weight=-0.02)
 
 
 @configclass
@@ -239,11 +247,17 @@ class EventsCfg(KickEventsCfg):
             "ball_y_range": (-0.15, 0.15),
             "target_distance_range": (4.0, 4.0),
             "visualize_target": False,
-            # PPO iteration transitions: 2k, 5k, and 10k.
-            # Stage 0 matches kick_001's current +/-30-degree target range;
-            # later stages expand the final result point toward full 360 degrees.
-            "target_angle_ranges_deg": ((-30.0, 30.0), (-60.0, 60.0), (-120.0, 120.0), (-180.0, 180.0)),
-            "stage_steps": (48_000, 120_000, 240_000),
+            # Absolute-angle bands force meaningful movement before the final
+            # all-direction distribution. Transitions are at PPO iterations
+            # 2k, 5k, 8k, and 10k.
+            "target_angle_magnitude_ranges_deg": (
+                (30.0, 60.0),
+                (45.0, 90.0),
+                (90.0, 135.0),
+                (135.0, 180.0),
+                (0.0, 180.0),
+            ),
+            "stage_steps": (48_000, 120_000, 192_000, 240_000),
             "curriculum_stage": -1,
             "ball_height": 0.105,
         },
@@ -274,7 +288,7 @@ class K1AdjustEnvCfg(ManagerBasedRLEnvCfg):
 
 @configclass
 class K1AdjustPlayEnvCfg(K1AdjustEnvCfg):
-    """Deterministic full-360-degree alignment evaluation configuration."""
+    """Deterministic initial-curriculum alignment evaluation configuration."""
 
     def __post_init__(self):
         super().__post_init__()
@@ -283,5 +297,6 @@ class K1AdjustPlayEnvCfg(K1AdjustEnvCfg):
         self.events.body_mass = None
         self.events.body_com = None
         self.events.pd_gains = None
-        self.events.reset_scenario.params["curriculum_stage"] = 3
+        # Validate the same initial distribution as the first training stage.
+        self.events.reset_scenario.params["curriculum_stage"] = 0
         self.events.reset_scenario.params["visualize_target"] = True

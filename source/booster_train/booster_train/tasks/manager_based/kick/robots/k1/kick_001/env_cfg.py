@@ -175,7 +175,9 @@ class ObservationsCfg:
 class RewardsCfg:
     survival = RewTerm(func=mdp.survival, weight=0.05)
     stationary_xy = RewTerm(func=mdp.stationary_base_xy, weight=0.1, params={"std": 0.5})
-    stationary_yaw = RewTerm(func=mdp.stationary_base_yaw, weight=0.05, params={"std": 0.5})
+    # Yaw motion is allowed: the actor may twist its trunk to cover the full
+    # +/-30 degree target range.
+    stationary_yaw = RewTerm(func=mdp.stationary_base_yaw, weight=0.0, params={"std": 0.5})
 
     ball_velocity_target = RewTerm(
         func=mdp.ball_velocity_to_target,
@@ -189,7 +191,7 @@ class RewardsCfg:
     )
     kick_direction_accuracy = RewTerm(
         func=mdp.kick_direction_accuracy,
-        weight=20.0,
+        weight=30.0,
         # Do not let tiny/noisy ball motion dominate the direction objective.
         params={"target_xy": (4.0, 0.0), "minimum_speed": 0.20},
     )
@@ -200,7 +202,7 @@ class RewardsCfg:
     )
     ball_lateral_velocity = RewTerm(
         func=mdp.ball_lateral_velocity,
-        weight=-20.0,
+        weight=-30.0,
         params={"target_xy": (4.0, 0.0)},
     )
     kicking_foot_approach = RewTerm(
@@ -320,14 +322,22 @@ class RewardsCfg:
     joint_vel = RewTerm(func=mdp.joint_vel_l2, weight=-3.0e-4)
     joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
     # A strong action-rate penalty fights the fast post-kick recovery motion.
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.75)
-    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-1.0)
-    feet_slide = RewTerm(
-        func=mdp.feet_slide,
-        weight=-2.5,
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.4)
+    joint_limits = RewTerm(func=mdp.joint_pos_limits, weight=-5.0)
+    support_foot_slide = RewTerm(
+        func=mdp.support_foot_slide,
+        weight=-5.0,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_foot_link", "right_foot_link"]),
-            "asset_cfg": SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_foot_link", "right_foot_link"],
+                preserve_order=True,
+            ),
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["left_foot_link", "right_foot_link"],
+                preserve_order=True,
+            ),
         },
     )
     hip_roll_spread = RewTerm(
@@ -335,7 +345,9 @@ class RewardsCfg:
         weight=-20.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Hip_Roll"])},
     )
-    body_twist = RewTerm(func=mdp.body_twist, weight=-5.0)
+    # Retain only a light safety cost for violent yaw-rate spikes; deliberate
+    # body twisting for angled kicks is otherwise allowed.
+    body_twist = RewTerm(func=mdp.body_twist, weight=-0.25)
 
 
 @configclass

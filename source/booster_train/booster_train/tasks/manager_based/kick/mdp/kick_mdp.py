@@ -483,10 +483,11 @@ def ball_lateral_velocity(
     target_xy: tuple[float, float] = (4.0, 0.0),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """Penalize velocity perpendicular to the ball-to-target direction."""
+    """Penalize velocity perpendicular to the fixed launch direction."""
     ball: RigidObject = env.scene[ball_cfg.name]
     target_w = _kick_target_w(env, target_xy)
-    direction = target_w - ball.data.root_pos_w[:, :2]
+    ball_start_xy = getattr(env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
+    direction = target_w - ball_start_xy
     direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp_min(1.0e-6)
     velocity = ball.data.root_lin_vel_w[:, :2]
     forward = torch.sum(velocity * direction, dim=1, keepdim=True) * direction
@@ -499,10 +500,11 @@ def kick_direction_accuracy(
     minimum_speed: float = 0.05,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """Signed cosine of the actual post-contact ball travel direction."""
+    """Signed cosine of velocity against the fixed desired launch direction."""
     ball: RigidObject = env.scene[ball_cfg.name]
     target_w = _kick_target_w(env, target_xy)
-    direction = target_w - ball.data.root_pos_w[:, :2]
+    ball_start_xy = getattr(env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
+    direction = target_w - ball_start_xy
     direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp_min(1.0e-6)
     velocity = ball.data.root_lin_vel_w[:, :2]
     speed = torch.norm(velocity, dim=1)
@@ -1030,6 +1032,38 @@ def feet_too_close(
 def body_twist(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     robot: Articulation = env.scene[asset_cfg.name]
     return robot.data.root_ang_vel_b[:, 2].square()
+
+
+def support_foot_slide(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
+    ),
+) -> torch.Tensor:
+    """Penalize horizontal sliding of only the non-kicking support foot."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    robot: Articulation = env.scene[asset_cfg.name]
+    foot_speed_xy = torch.norm(
+        robot.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=2
+    )
+
+    preferred = getattr(
+        env,
+        "_kick_preferred_foot",
+        torch.ones(env.num_envs, dtype=torch.long, device=env.device),
+    )
+    # Foot order is [left, right]. The support foot is opposite the selected
+    # kicking foot. Fall back to the left foot for an unset preference.
+    support = torch.where(preferred >= 0, 1 - preferred.clamp(0, 1), 0)
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    return foot_speed_xy[env_ids, support] * contacts[env_ids, support].float()
 
 
 def ball_success(
