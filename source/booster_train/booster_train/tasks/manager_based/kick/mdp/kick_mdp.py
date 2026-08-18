@@ -106,6 +106,28 @@ def kick_target_pos_b(
     return quat_apply_inverse(yaw_quat(robot.data.root_quat_w), delta_w)[:, :2]
 
 
+def kick_ball_target_direction_b(
+    env: ManagerBasedEnv,
+    target_xy: tuple[float, float] = (4.0, 0.0),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+) -> torch.Tensor:
+    """Return the unit direction from the ball to the target in robot yaw frame."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    ball: RigidObject = env.scene[ball_cfg.name]
+    target_w = _kick_target_w(env, target_xy)
+    target_from_ball_w = target_w - ball.data.root_pos_w[:, :2]
+    target_from_ball_3d = torch.cat(
+        (target_from_ball_w, torch.zeros(env.num_envs, 1, device=env.device)), dim=1
+    )
+    target_from_ball_b = quat_apply_inverse(
+        yaw_quat(robot.data.root_quat_w), target_from_ball_3d
+    )[:, :2]
+    return target_from_ball_b / torch.norm(
+        target_from_ball_b, dim=1, keepdim=True
+    ).clamp_min(1.0e-6)
+
+
 def _camera_ball_observation(
     env: ManagerBasedEnv,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),

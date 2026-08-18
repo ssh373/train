@@ -128,10 +128,12 @@ class ObservationsCfg:
             clip=(-3.0, 3.0),
         )
         target_position = ObsTerm(
-            func=mdp.kick_target_pos_b,
+            # Direction-only target input.  The target is defined from the
+            # ball because the learned objective is the ball's launch angle.
+            func=mdp.kick_ball_target_direction_b,
             params={"target_xy": (4.0, 0.0)},
-            scale=0.25,
-            clip=(-2.0, 2.0),
+            scale=1.0,
+            clip=(-1.0, 1.0),
         )
         ball_visible = ObsTerm(func=mdp.ball_visible)
         ball_time_since_seen = ObsTerm(func=mdp.ball_time_since_seen)
