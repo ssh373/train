@@ -43,8 +43,11 @@ class ActionsCfg:
         use_default_offset=True,
         teacher_path=WALK_TEACHER_PATH,
         kick_teacher_path=KICK_TEACHER_PATH,
-        kick_teacher_blend_steps=(40_000, 80_000, 140_000),
-        kick_teacher_blend=(1.0, 0.67, 0.33, 0.0),
+        # Keep the validated kick direct for most of training; only late
+        # training lets the student absorb small environment-specific changes.
+        kick_teacher_blend_steps=(200_000, 400_000, 650_000),
+        kick_teacher_blend=(1.0, 0.90, 0.70, 0.0),
+        kick_teacher_post_kick_duration_s=0.0,
         handoff_stage_steps=(100_000, 250_000, 500_000),
         handoff_distance_ranges=(
             (0.55, 0.65),
@@ -54,8 +57,8 @@ class ActionsCfg:
         ),
         slowdown_distance=0.90,
         handoff_heading_tolerance_deg=20.0,
-        transition_duration_s=0.0,
-        execute_walk_teacher=False,
+        transition_duration_s=0.25,
+        execute_walk_teacher=True,
         walk_full_speed_heading_deg=15.0,
         walk_stop_translation_heading_deg=45.0,
     )
@@ -70,16 +73,32 @@ class RewardsCfg(KickRewardsCfg):
     waiting = None
     no_kick_failure = None
 
+    # Lower the trunk by about 3 cm for quick contact-free side adjustment and
+    # the kick itself, then return upright for walk-ready recovery.
+    base_height = RewTerm(
+        func=mdp.phase_base_height_l2,
+        weight=-200.0,
+        params={"pre_kick_target": 0.52, "post_kick_target": 0.55},
+    )
+
     # Kick terms are gated by geometric readiness. They cannot reward an early
     # touch while the robot is still approaching or rotating around the ball.
     ball_velocity_target = RewTerm(func=mdp.gated_kick_velocity, weight=10.0)
+    kick_speed_target = RewTerm(
+        func=mdp.direction_gated_kick_speed,
+        weight=12.0,
+        params={"target_speed": 3.0, "min_direction_score": 0.98},
+    )
+    # Kick speed itself is not penalized in this task; direction and target
+    # accuracy are the objectives. The original kick task remains unchanged.
+    ball_overspeed = None
     # Match kick_001's target-distance shaping while keeping a stricter final
     # direction condition in the success termination below.
     ball_target_accuracy = RewTerm(func=mdp.gated_kick_accuracy, weight=20.0, params={"std": 0.25})
     kick_direction_accuracy = RewTerm(
-        func=mdp.kick_direction_accuracy, weight=15.0, params={"minimum_speed": 0.10}
+        func=mdp.kick_direction_accuracy, weight=25.0, params={"minimum_speed": 0.05}
     )
-    ball_lateral_velocity = RewTerm(func=mdp.gated_kick_lateral_velocity, weight=-8.0)
+    ball_lateral_velocity = RewTerm(func=mdp.gated_kick_lateral_velocity, weight=-20.0)
     kicking_foot_approach = RewTerm(
         func=mdp.gated_kicking_foot_approach,
         weight=4.0,
@@ -126,9 +145,10 @@ class RewardsCfg(KickRewardsCfg):
         weight=-12.0,
         params={"tolerance_deg": 20.0, "full_penalty_deg": 45.0},
     )
-    fast_approach_velocity = RewTerm(
-        func=mdp.fast_approach_velocity, weight=3.0, params={"target_speed": 1.2}
-    )
+    # The ball already starts in the kick-distance band; do not train a
+    # separate forward-approach behavior. Position progress below is retained
+    # because it also teaches movement around the ball to the aligned pose.
+    fast_approach_velocity = None
     adjust_pose_accuracy = RewTerm(
         func=mdp.adjust_pose_accuracy,
         weight=4.0,
@@ -163,14 +183,17 @@ class RewardsCfg(KickRewardsCfg):
     kick_teacher_tracking = RewTerm(
         func=mdp.kick_teacher_tracking,
         weight=4.0,
-        params={"std": 0.20},
+        # Permit modest deviations such as a deeper knee bend while retaining
+        # the validated kick shape.
+        params={"std": 0.25},
     )
 
     # Strong post-kick landing and stand-still objective.
     post_kick_recovery = RewTerm(
         func=kick_mdp.post_kick_recovery,
         weight=4.0,
-        params={"kick_speed_threshold": 0.2},
+        # Require a meaningful ball launch before entering recovery.
+        params={"kick_speed_threshold": 0.5},
     )
     walk_ready_after_kick = RewTerm(
         func=kick_mdp.walk_ready_after_kick,
@@ -197,8 +220,10 @@ class TerminationsCfg(KickTerminationsCfg):
             "target_xy": (4.0, 0.0),
             "target_radius": 0.15,
             # About +/-5.7 degrees from the initial ball-to-target vector.
-            "min_direction_score": 0.995,
-            "max_speed": 2.5,
+            "min_direction_score": 0.998,
+            # No practical arrival-speed cap: direction and target position
+            # determine success for this task.
+            "max_speed": 100.0,
             "recovery_time": 0.8,
             "max_base_speed": 0.35,
             "max_tilt": 0.2,
@@ -261,6 +286,13 @@ class K1AdjustKickPlayEnvCfg(K1AdjustKickEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 16
-        self.events.reset_scenario.params["stage_steps"] = (0, 0, 0)
+        # Diagnose early checkpoints on the same Stage-0 distribution used by
+        # training; switch back to (0, 0, 0) for final Stage-3 evaluation.
+        self.events.reset_scenario.params["stage_steps"] = (
+            1_000_000_000,
+            1_000_000_000,
+            1_000_000_000,
+        )
         self.events.reset_scenario.params["visualize_target"] = True
         self.actions.joint_pos.handoff_stage_steps = (0, 0, 0)
+        self.actions.joint_pos.debug_ready_latch = True

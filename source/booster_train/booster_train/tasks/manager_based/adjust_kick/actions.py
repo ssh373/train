@@ -159,7 +159,17 @@ class FrozenWalkAdjustAction(JointPositionAction):
             self._adjust_latched
             & ~self._transition_active
             & _ready_latch(self._env)
-            & ~kick_happened
+            & (
+                ~kick_happened
+                | (
+                    getattr(
+                        self._env,
+                        "_kick_recovery_time",
+                        torch.zeros(self.num_envs, device=self.device),
+                    )
+                    < self.cfg.kick_teacher_post_kick_duration_s
+                )
+            )
         )
         if not self._kick_teacher_active.any():
             return
@@ -198,21 +208,65 @@ class FrozenWalkAdjustAction(JointPositionAction):
                 blend,
             )
 
+    def _print_ready_debug(self) -> None:
+        """Print Play-only ready-gate diagnostics at a low frequency."""
+        if not self.cfg.debug_ready_latch:
+            return
+        step = int(getattr(self._env, "common_step_counter", 0))
+        if step % self.cfg.debug_ready_interval_steps != 0:
+            return
+
+        _, pose_error, heading_error = _adjust_geometry(self._env)
+        ball = self._env.scene["ball"]
+        ball_speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
+        ball_start = getattr(self._env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
+        ball_displacement = torch.norm(ball.data.root_pos_w[:, :2] - ball_start, dim=1)
+        robot_ball_distance = torch.norm(
+            self._asset.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2], dim=1
+        )
+        ready = _ready_latch(self._env)
+        kick_happened = getattr(
+            self._env,
+            "_kick_happened",
+            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        )
+        checks = {
+            "pose": pose_error <= 0.22,
+            "heading": heading_error.abs() <= math.radians(25.0),
+            "speed": ball_speed <= 0.15,
+            "distance": (robot_ball_distance >= 0.10) & (robot_ball_distance <= 0.35),
+            "displacement": ball_displacement <= 0.10,
+        }
+        passed = " ".join(
+            f"{name}={int(mask.sum().item())}/{self.num_envs}" for name, mask in checks.items()
+        )
+        print(
+            f"[ADJUST_KICK_READY] step={step} ready={int(ready.sum().item())}/{self.num_envs} "
+            f"teacher={int(self._kick_teacher_active.sum().item())}/{self.num_envs} "
+            f"kicked={int(kick_happened.sum().item())}/{self.num_envs} | {passed} | "
+            f"mean pose={pose_error.mean().item():.3f}m "
+            f"heading={torch.rad2deg(heading_error.abs()).mean().item():.1f}deg "
+            f"ball_speed={ball_speed.mean().item():.3f}m/s "
+            f"robot_ball={robot_ball_distance.mean().item():.3f}m "
+            f"displacement={ball_displacement.mean().item():.3f}m",
+            flush=True,
+        )
+
     def process_actions(self, actions: torch.Tensor):
         super().process_actions(actions)
         self._student_processed_actions.copy_(self._processed_actions)
 
         error_b, pre_kick_pose_distance, heading_error = _adjust_geometry(self._env)
-        robot_ball_distance = torch.norm(ball_pos_b(self._env), dim=1)
-        face_ball_error = approach_heading_error(self._env).abs()
-        # Keep the validated walk teacher in control until the robot is both
-        # close enough and actually looking at the ball. This still supports
-        # 360-degree starts: the walk teacher rotates first, then hands off.
+        # Keep the validated walk teacher in control through the contact-free
+        # orbit/side-step alignment. This supports 360-degree targets: the
+        # teacher rotates and translates around the ball, then hands off only
+        # after the precise ready gate.
         if self.cfg.execute_walk_teacher:
-            enter_adjust = (
-                (robot_ball_distance <= self._handoff_distance)
-                & (face_ball_error <= math.radians(self.cfg.handoff_heading_tolerance_deg))
-            )
+            # The ball is already in the kick-distance band. Let the frozen
+            # walk teacher perform the contact-free orbit/side-step alignment
+            # until the precise behind-ball ready gate is reached. This avoids
+            # handing control to the student merely because the ball is close.
+            enter_adjust = _ready_latch(self._env) & ~self._adjust_latched
         else:
             # Adjust-only task: the student owns control from the first step.
             enter_adjust = torch.ones(
@@ -228,12 +282,12 @@ class FrozenWalkAdjustAction(JointPositionAction):
             )
         else:
             self._transition_active.zero_()
-        walk_active = ~self._adjust_latched
         kick_happened = getattr(
             self._env,
             "_kick_happened",
             torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
         )
+        walk_active = (~self._adjust_latched) & (~kick_happened)
         self._walk_teacher_reference_active.copy_(
             (~_ready_latch(self._env)) & (~kick_happened)
         )
@@ -310,6 +364,7 @@ class FrozenWalkAdjustAction(JointPositionAction):
                 self._transition_elapsed[active] += self._env.step_dt
 
         self._process_kick_teacher()
+        self._print_ready_debug()
 
     def reset(self, env_ids=None) -> None:
         super().reset(env_ids)
@@ -336,6 +391,7 @@ class FrozenWalkAdjustActionCfg(JointPositionActionCfg):
     kick_teacher_env_var: str = "ADJUST_KICK_KICK_TEACHER_JIT"
     kick_teacher_blend_steps: tuple[int, int, int] = (40_000, 80_000, 140_000)
     kick_teacher_blend: tuple[float, float, float, float] = (1.0, 0.67, 0.33, 0.0)
+    kick_teacher_post_kick_duration_s: float = 0.8
     handoff_stage_steps: tuple[int, int, int] = (100_000, 250_000, 500_000)
     handoff_distance_ranges: tuple[tuple[float, float], ...] = (
         (0.55, 0.65),
@@ -353,3 +409,5 @@ class FrozenWalkAdjustActionCfg(JointPositionActionCfg):
     command_gain_y: float = 1.8
     command_gain_yaw: float = 2.5
     gait_frequency: float = 2.0
+    debug_ready_latch: bool = False
+    debug_ready_interval_steps: int = 50

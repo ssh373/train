@@ -38,11 +38,13 @@ def reset_adjust_kick_scenario(
     """Reset ball and target using a four-stage 360-degree curriculum."""
     stage = _curriculum_stage(env, stage_steps)
     distributions = (
-        # The ball always starts nearby and in front. Only target direction widens.
-        ((0.28, 0.45), (-8.0, 8.0), (3.5, 4.5), (-30.0, 30.0)),
-        ((0.32, 0.55), (-12.0, 12.0), (3.5, 5.5), (-90.0, 90.0)),
-        ((0.35, 0.65), (-15.0, 15.0), (3.5, 6.0), (-180.0, 180.0)),
-        ((0.30, 0.75), (-15.0, 15.0), (3.0, 7.0), (-180.0, 180.0)),
+        # The ball always starts inside the kick-distance band. Curriculum
+        # difficulty comes from circling around it to wider target bearings,
+        # not from learning a separate forward approach behavior.
+        ((0.28, 0.35), (-8.0, 8.0), (3.5, 4.5), (-30.0, 30.0)),
+        ((0.28, 0.35), (-12.0, 12.0), (3.5, 5.5), (-90.0, 90.0)),
+        ((0.28, 0.35), (-15.0, 15.0), (3.5, 6.0), (-180.0, 180.0)),
+        ((0.28, 0.35), (-15.0, 15.0), (3.0, 7.0), (-180.0, 180.0)),
     )
     ball_distance, ball_bearing, target_distance, target_angle = distributions[stage]
     kick_mdp.reset_ball_in_front(
@@ -122,22 +124,31 @@ def facing_translation_scale(
 
 def _ready_latch(
     env: ManagerBasedEnv,
-    position_tolerance: float = 0.16,
-    heading_tolerance_deg: float = 12.0,
-    ball_speed_tolerance: float = 0.08,
+    position_tolerance: float = 0.22,
+    heading_tolerance_deg: float = 25.0,
+    ball_speed_tolerance: float = 0.15,
+    min_robot_ball_distance: float = 0.10,
+    max_robot_ball_distance: float = 0.35,
+    max_ball_displacement: float = 0.10,
 ) -> torch.Tensor:
     if not hasattr(env, "_adjust_ready_latched"):
         env._adjust_ready_latched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     _, distance, heading_error = _adjust_geometry(env)
     ball: RigidObject = env.scene["ball"]
     ball_speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
+    robot: Articulation = env.scene["robot"]
+    robot_ball_distance = torch.norm(
+        robot.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2], dim=1
+    )
     ball_start = getattr(env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
     ball_displacement = torch.norm(ball.data.root_pos_w[:, :2] - ball_start, dim=1)
     ready_now = (
         (distance <= position_tolerance)
         & (heading_error.abs() <= math.radians(heading_tolerance_deg))
         & (ball_speed <= ball_speed_tolerance)
-        & (ball_displacement <= 0.05)
+        & (robot_ball_distance >= min_robot_ball_distance)
+        & (robot_ball_distance <= max_robot_ball_distance)
+        & (ball_displacement <= max_ball_displacement)
     )
     transition_active = getattr(
         env,
@@ -292,8 +303,48 @@ def approach_time(env: ManagerBasedRLEnv) -> torch.Tensor:
     return ((~_ready_latch(env)) & (~kick_happened)).float()
 
 
+def phase_base_height_l2(
+    env: ManagerBasedRLEnv,
+    pre_kick_target: float = 0.52,
+    post_kick_target: float = 0.55,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Use a shallow crouch for adjustment/kick, then recover upright."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    kick_happened = getattr(
+        env, "_kick_happened", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    target = torch.where(
+        kick_happened,
+        torch.full_like(robot.data.root_pos_w[:, 2], post_kick_target),
+        torch.full_like(robot.data.root_pos_w[:, 2], pre_kick_target),
+    )
+    return (robot.data.root_pos_w[:, 2] - target).square()
+
+
 def gated_kick_velocity(env: ManagerBasedRLEnv) -> torch.Tensor:
     return kick_mdp.ball_velocity_to_target(env, decay_distance=4.0, max_reward=10.0) * _ready_latch(env).float()
+
+
+def direction_gated_kick_speed(
+    env: ManagerBasedRLEnv,
+    target_speed: float = 3.0,
+    min_direction_score: float = 0.98,
+) -> torch.Tensor:
+    """Reward a strong kick only after its immediate direction is accurate."""
+    ball: RigidObject = env.scene["ball"]
+    target_w = kick_mdp._kick_target_w(env, (4.0, 0.0))
+    target_direction = target_w - ball.data.root_pos_w[:, :2]
+    target_direction = target_direction / torch.norm(target_direction, dim=1, keepdim=True).clamp_min(1.0e-6)
+    velocity = ball.data.root_lin_vel_w[:, :2]
+    speed = torch.norm(velocity, dim=1)
+    direction_score = torch.sum(velocity * target_direction, dim=1) / speed.clamp_min(1.0e-6)
+    direction_gate = ((direction_score - min_direction_score) / (1.0 - min_direction_score)).clamp(0.0, 1.0)
+    valid_kick = getattr(
+        env, "_kick_valid_foot_kick", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    )
+    active = _ready_latch(env) & valid_kick
+    return (speed / target_speed).clamp(0.0, 1.0) * direction_gate * active.float()
 
 
 def gated_kick_accuracy(env: ManagerBasedRLEnv, std: float = 0.25) -> torch.Tensor:
@@ -301,7 +352,12 @@ def gated_kick_accuracy(env: ManagerBasedRLEnv, std: float = 0.25) -> torch.Tens
 
 
 def kick_direction_accuracy(env: ManagerBasedRLEnv, minimum_speed: float = 0.10) -> torch.Tensor:
-    """Dense accuracy reward for the immediate ball velocity direction."""
+    """Signed reward for the *actual* post-contact ball travel direction.
+
+    Keep wrong-direction kicks negative instead of turning them into zero
+    reward.  This makes the objective care about the launched ball velocity,
+    independently of the robot's pre-kick yaw.
+    """
     ball: RigidObject = env.scene["ball"]
     target_w = kick_mdp._kick_target_w(env, (4.0, 0.0))
     target_direction = target_w - ball.data.root_pos_w[:, :2]
@@ -313,7 +369,9 @@ def kick_direction_accuracy(env: ManagerBasedRLEnv, minimum_speed: float = 0.10)
         env, "_kick_valid_foot_kick", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
     active = _ready_latch(env) & valid_kick & (speed >= minimum_speed)
-    return direction_score.clamp(-1.0, 1.0).sub(0.8).div(0.2).clamp(0.0, 1.0) * active.float()
+    # score=+1 is a perfectly aligned launch and score=-1 is fully reversed.
+    # The signed value is intentional: a fast miss must be worse than no kick.
+    return direction_score.clamp(-1.0, 1.0) * active.float()
 
 
 def gated_kick_lateral_velocity(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -464,7 +522,7 @@ def walk_teacher_tracking(
     teacher_env_var: str = "ADJUST_KICK_WALK_TEACHER_JIT",
     std: float = 0.20,
 ) -> torch.Tensor:
-    """Imitate the validated walk teacher during approach."""
+    """Imitate the validated walk teacher during contact-free alignment."""
     action_term = env.action_manager.get_term("joint_pos")
     if hasattr(action_term, "student_processed_actions"):
         error = torch.mean(

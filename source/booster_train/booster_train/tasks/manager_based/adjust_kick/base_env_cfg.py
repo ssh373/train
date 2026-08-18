@@ -80,9 +80,10 @@ class KickSceneCfg(InteractiveSceneCfg):
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.37),
             physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.0,
-                dynamic_friction=1.0,
-                restitution=0.0,
+                # Match the validated kick_001 ball-roll physics.
+                static_friction=0.4,
+                dynamic_friction=0.3,
+                restitution=0.08,
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",
             ),
