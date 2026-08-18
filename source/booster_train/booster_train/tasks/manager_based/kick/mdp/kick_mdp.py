@@ -493,6 +493,29 @@ def ball_lateral_velocity(
     return torch.sum((velocity - forward).square(), dim=1)
 
 
+def kick_direction_accuracy(
+    env: ManagerBasedRLEnv,
+    target_xy: tuple[float, float] = (4.0, 0.0),
+    minimum_speed: float = 0.05,
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+) -> torch.Tensor:
+    """Signed cosine of the actual post-contact ball travel direction."""
+    ball: RigidObject = env.scene[ball_cfg.name]
+    target_w = _kick_target_w(env, target_xy)
+    direction = target_w - ball.data.root_pos_w[:, :2]
+    direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp_min(1.0e-6)
+    velocity = ball.data.root_lin_vel_w[:, :2]
+    speed = torch.norm(velocity, dim=1)
+    direction_score = torch.sum(velocity * direction, dim=1) / speed.clamp_min(1.0e-6)
+    valid_kick = getattr(
+        env, "_kick_valid_foot_kick",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    active = valid_kick & (speed >= minimum_speed)
+    # Keep wrong-direction kicks negative instead of giving them zero reward.
+    return direction_score.clamp(-1.0, 1.0) * active.float()
+
+
 def ball_overspeed(
     env: ManagerBasedRLEnv,
     max_speed: float = 2.5,

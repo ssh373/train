@@ -187,6 +187,11 @@ class RewardsCfg:
         weight=10.0,
         params={"target_xy": (4.0, 0.0), "std": 0.25},
     )
+    kick_direction_accuracy = RewTerm(
+        func=mdp.kick_direction_accuracy,
+        weight=20.0,
+        params={"target_xy": (4.0, 0.0), "minimum_speed": 0.05},
+    )
     ball_overspeed = RewTerm(
         func=mdp.ball_overspeed,
         weight=-1.5,
@@ -194,7 +199,7 @@ class RewardsCfg:
     )
     ball_lateral_velocity = RewTerm(
         func=mdp.ball_lateral_velocity,
-        weight=-8.0,
+        weight=-20.0,
         params={"target_xy": (4.0, 0.0)},
     )
     kicking_foot_approach = RewTerm(
@@ -336,8 +341,8 @@ class TerminationsCfg:
         params={
             "target_xy": (4.0, 0.0),
             "target_radius": 0.15,
-            # cos(theta) > 0.98 corresponds to about +/-11.5 degrees.
-            "min_direction_score": 0.98,
+            # cos(theta) > 0.995 corresponds to about +/-5.7 degrees.
+            "min_direction_score": 0.995,
             "max_speed": 2.5,
             "recovery_time": 0.8,
             "max_base_speed": 0.35,
@@ -348,7 +353,13 @@ class TerminationsCfg:
     ball_too_far = DoneTerm(func=mdp.ball_too_far, params={"max_distance": 5.5})
     ball_not_kicked = DoneTerm(
         func=mdp.ball_not_kicked_in_time,
-        params={"time_limit": 2.5, "movement_speed": 0.12},
+        params={
+            "time_limit": 2.5,
+            "movement_speed": 0.12,
+            # Reject a kick whose initial velocity is more than about 11.5
+            # degrees away from the ball-to-target direction.
+            "min_direction_cos": 0.98,
+        },
     )
 
 
