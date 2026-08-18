@@ -113,6 +113,7 @@ class RewardsCfg:
             "heading_tolerance_deg": 15.0,
             "linear_speed_tolerance": 0.10,
             "yaw_speed_tolerance": 0.10,
+            "maximum_tilt_deg": 5.0,
             "contact_threshold": 1.0,
             "feet_midpoint_tolerance": 0.10,
             "feet_longitudinal_spread_tolerance": 0.12,
@@ -244,7 +245,23 @@ class RewardsCfg:
         weight=-0.05,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=LEGS)},
     )
-    orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
+    orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
+    tilt_limit = RewTerm(
+        func=mdp.dynamic_tilt_limit_penalty,
+        weight=-3.0,
+        params={
+            "moving_allowance_deg": 10.0,
+            "arrival_allowance_deg": 5.0,
+            "upright_error": 0.06,
+            "moving_error": 0.10,
+            "violation_scale_deg": 5.0,
+        },
+    )
+    arrival_upright = RewTerm(
+        func=mdp.arrival_upright_penalty,
+        weight=-9.0,
+        params={"alignment_scale": 0.10},
+    )
     lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.5)
     ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     joint_torques = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
@@ -295,6 +312,7 @@ class TerminationsCfg:
             "heading_tolerance_deg": 15.0,
             "linear_speed_tolerance": 0.10,
             "yaw_speed_tolerance": 0.10,
+            "maximum_tilt_deg": 5.0,
             "contact_threshold": 1.0,
             "feet_midpoint_tolerance": 0.10,
             "feet_longitudinal_spread_tolerance": 0.12,

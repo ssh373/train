@@ -191,7 +191,7 @@ class RewardsCfg:
     )
     kick_direction_accuracy = RewTerm(
         func=mdp.kick_direction_accuracy,
-        weight=30.0,
+        weight=45.0,
         # Do not let tiny/noisy ball motion dominate the direction objective.
         params={
             "target_xy": (4.0, 0.0),
@@ -208,7 +208,7 @@ class RewardsCfg:
     )
     ball_lateral_velocity = RewTerm(
         func=mdp.ball_lateral_velocity,
-        weight=-30.0,
+        weight=-40.0,
         params={"target_xy": (4.0, 0.0)},
     )
     kicking_foot_approach = RewTerm(

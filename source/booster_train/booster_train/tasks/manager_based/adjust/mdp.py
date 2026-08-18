@@ -877,6 +877,51 @@ def alignment_stillness_penalty(
     return near_goal * (planar_speed + yaw_weight * yaw_speed)
 
 
+def _base_tilt_angle(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Absolute trunk tilt from world-up in radians."""
+
+    robot = env.scene["robot"]
+    return torch.acos((-robot.data.projected_gravity_b[:, 2]).clamp(-1.0, 1.0))
+
+
+def dynamic_tilt_limit_penalty(
+    env: ManagerBasedRLEnv,
+    moving_allowance_deg: float = 10.0,
+    arrival_allowance_deg: float = 5.0,
+    upright_error: float = 0.06,
+    moving_error: float = 0.10,
+    violation_scale_deg: float = 5.0,
+) -> torch.Tensor:
+    """Strongly penalize tilt beyond a distance-dependent soft allowance.
+
+    The allowance is 10 degrees during travel, blends to 5 degrees between
+    0.10 m and 0.06 m position error, and remains at 5 degrees throughout the
+    final success region.
+    """
+
+    blend_width = max(moving_error - upright_error, 1.0e-6)
+    travel_ratio = (
+        (alignment_position_error(env) - upright_error) / blend_width
+    ).clamp(0.0, 1.0)
+    allowance_deg = arrival_allowance_deg + (
+        moving_allowance_deg - arrival_allowance_deg
+    ) * travel_ratio
+    violation = torch.relu(_base_tilt_angle(env) - torch.deg2rad(allowance_deg))
+    return (violation / math.radians(violation_scale_deg)).square()
+
+
+def arrival_upright_penalty(
+    env: ManagerBasedRLEnv,
+    alignment_scale: float = 0.10,
+) -> torch.Tensor:
+    """Increase the ordinary upright cost smoothly near the final pose."""
+
+    robot = env.scene["robot"]
+    near_goal = torch.exp(-((alignment_position_error(env) / alignment_scale).square()))
+    tilt_l2 = torch.sum(robot.data.projected_gravity_b[:, :2].square(), dim=1)
+    return near_goal * tilt_l2
+
+
 def adjust_dynamic_base_height_l2(
     env: ManagerBasedRLEnv,
     arrival_height: float = 0.55,
@@ -938,6 +983,7 @@ def _alignment_ready(
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
+    maximum_tilt_deg: float = 5.0,
     contact_threshold: float = 1.0,
     feet_midpoint_tolerance: float = 0.10,
     feet_longitudinal_spread_tolerance: float = 0.12,
@@ -960,6 +1006,7 @@ def _alignment_ready(
         torch.linalg.vector_norm(robot.data.root_lin_vel_b[:, :2], dim=1)
         <= linear_speed_tolerance
     ) & (torch.abs(robot.data.root_ang_vel_b[:, 2]) <= yaw_speed_tolerance)
+    upright_ready = _base_tilt_angle(env) <= math.radians(maximum_tilt_deg)
     feet_ready = _final_feet_stance_ready(
         env,
         asset_cfg=feet_cfg,
@@ -971,7 +1018,15 @@ def _alignment_ready(
     ball_ready = (ball_speed(env) <= ball_speed_tolerance) & (
         ball_displacement(env) <= ball_displacement_tolerance
     )
-    return position_ready & heading_ready & motion_ready & feet_ready & grounded & ball_ready
+    return (
+        position_ready
+        & heading_ready
+        & motion_ready
+        & upright_ready
+        & feet_ready
+        & grounded
+        & ball_ready
+    )
 
 
 def alignment_ready_reward(
@@ -982,6 +1037,7 @@ def alignment_ready_reward(
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
+    maximum_tilt_deg: float = 5.0,
     contact_threshold: float = 1.0,
     feet_midpoint_tolerance: float = 0.10,
     feet_longitudinal_spread_tolerance: float = 0.12,
@@ -1000,6 +1056,7 @@ def alignment_ready_reward(
         heading_tolerance_deg=heading_tolerance_deg,
         linear_speed_tolerance=linear_speed_tolerance,
         yaw_speed_tolerance=yaw_speed_tolerance,
+        maximum_tilt_deg=maximum_tilt_deg,
         contact_threshold=contact_threshold,
         feet_midpoint_tolerance=feet_midpoint_tolerance,
         feet_longitudinal_spread_tolerance=feet_longitudinal_spread_tolerance,
@@ -1018,6 +1075,7 @@ def alignment_success(
     heading_tolerance_deg: float = 15.0,
     linear_speed_tolerance: float = 0.10,
     yaw_speed_tolerance: float = 0.10,
+    maximum_tilt_deg: float = 5.0,
     contact_threshold: float = 1.0,
     feet_midpoint_tolerance: float = 0.10,
     feet_longitudinal_spread_tolerance: float = 0.12,
@@ -1035,6 +1093,7 @@ def alignment_success(
         heading_tolerance_deg=heading_tolerance_deg,
         linear_speed_tolerance=linear_speed_tolerance,
         yaw_speed_tolerance=yaw_speed_tolerance,
+        maximum_tilt_deg=maximum_tilt_deg,
         contact_threshold=contact_threshold,
         feet_midpoint_tolerance=feet_midpoint_tolerance,
         feet_longitudinal_spread_tolerance=feet_longitudinal_spread_tolerance,
