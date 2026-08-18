@@ -112,6 +112,8 @@ def _camera_ball_observation(
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
     base_noise_std: float = 0.01,
     distance_noise_ratio: float = 0.01,
+    temporal_bias_std: float = 0.035,
+    temporal_bias_tau_s: float = 0.18,
     dropout_rate_per_s: float = 0.35,
     dropout_duration_range: tuple[float, float] = (0.05, 0.25),
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -119,7 +121,9 @@ def _camera_ball_observation(
 
     During a dropout the actor receives the last detected XY coordinate plus
     visibility=0, increasing age, and confidence=0.  Rewards and critic terms
-    continue to use exact simulator state.
+    continue to use exact simulator state.  The slowly varying bias models
+    camera/neck motion and body sway; independent noise alone would make the
+    simulated vision unrealistically white and uncorrelated.
     """
     true_pos = ball_pos_b(env, ball_cfg=ball_cfg)[:, :2]
     episode_time = env.episode_length_buf.float() * env.step_dt
@@ -128,6 +132,7 @@ def _camera_ball_observation(
         env._kick_camera_last_pos_b = true_pos.detach().clone()
         env._kick_camera_dropout_until = torch.zeros(env.num_envs, device=env.device)
         env._kick_camera_last_seen_time = episode_time.detach().clone()
+        env._kick_camera_temporal_bias = torch.zeros_like(true_pos)
         env._kick_camera_visible = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
         env._kick_camera_confidence = torch.ones(env.num_envs, device=env.device)
         env._kick_camera_last_episode_length = torch.full(
@@ -140,6 +145,7 @@ def _camera_ball_observation(
         reset = env.episode_length_buf <= 1
         if reset.any():
             env._kick_camera_last_pos_b[reset] = true_pos[reset]
+            env._kick_camera_temporal_bias[reset] = 0.0
             env._kick_camera_dropout_until[reset] = 0.0
             env._kick_camera_last_seen_time[reset] = episode_time[reset]
 
@@ -154,7 +160,20 @@ def _camera_ball_observation(
         visible = episode_time >= env._kick_camera_dropout_until
         distance = torch.norm(true_pos, dim=1, keepdim=True)
         noise_std = base_noise_std + distance_noise_ratio * distance
-        noisy_pos = true_pos + torch.randn_like(true_pos) * noise_std
+        # OU-like stationary correlated bias.  It persists over several
+        # camera frames, approximating head/body motion and tracking drift.
+        dt = max(float(env.step_dt), 1.0e-6)
+        tau = max(float(temporal_bias_tau_s), dt)
+        alpha = 1.0 - math.exp(-dt / tau)
+        innovation_scale = math.sqrt(max(1.0 - alpha * alpha, 0.0))
+        env._kick_camera_temporal_bias.mul_(1.0 - alpha).add_(
+            torch.randn_like(true_pos) * (temporal_bias_std * innovation_scale)
+        )
+        noisy_pos = (
+            true_pos
+            + env._kick_camera_temporal_bias
+            + torch.randn_like(true_pos) * noise_std
+        )
         env._kick_camera_last_pos_b[visible] = noisy_pos[visible]
         env._kick_camera_last_seen_time[visible] = episode_time[visible]
         env._kick_camera_visible.copy_(visible)
@@ -176,6 +195,8 @@ def camera_ball_pos_b(
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
     base_noise_std: float = 0.01,
     distance_noise_ratio: float = 0.01,
+    temporal_bias_std: float = 0.035,
+    temporal_bias_tau_s: float = 0.18,
     dropout_rate_per_s: float = 0.35,
     dropout_duration_range: tuple[float, float] = (0.05, 0.25),
 ) -> torch.Tensor:
@@ -184,6 +205,8 @@ def camera_ball_pos_b(
         ball_cfg=ball_cfg,
         base_noise_std=base_noise_std,
         distance_noise_ratio=distance_noise_ratio,
+        temporal_bias_std=temporal_bias_std,
+        temporal_bias_tau_s=temporal_bias_tau_s,
         dropout_rate_per_s=dropout_rate_per_s,
         dropout_duration_range=dropout_duration_range,
     )[0]
