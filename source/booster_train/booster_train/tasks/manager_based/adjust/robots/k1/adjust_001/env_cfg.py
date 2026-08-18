@@ -117,8 +117,8 @@ class RewardsCfg:
         weight=3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=FEET, preserve_order=True),
-            "target_progress_per_step": 0.12,
-            "maximum_progress_per_step": 0.24,
+            "target_progress_per_step": 0.18,
+            "maximum_progress_per_step": 0.30,
         },
     )
     orbit_tangent = RewTerm(
@@ -139,10 +139,10 @@ class RewardsCfg:
             "asset_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
             "target_air_time": 0.18,
             "air_time_std": 0.10,
-            "target_clearance": 0.045,
+            "target_clearance": 0.055,
             "clearance_std": 0.025,
             "swing_speed_scale": 0.15,
-            "minimum_swing_height": 0.025,
+            "minimum_swing_height": 0.035,
             "alignment_gate_error": 0.08,
         },
     )
@@ -155,6 +155,21 @@ class RewardsCfg:
             "maximum_spacing": 0.32,
             "lower_violation_scale": 0.08,
             "upper_violation_scale": 0.05,
+        },
+    )
+    lower_leg_alignment = RewTerm(
+        func=mdp.lower_leg_forward_alignment_penalty,
+        weight=-1.0,
+        params={
+            "feet_cfg": SceneEntityCfg("robot", body_names=FEET, preserve_order=True),
+            "ankle_roll_cfg": SceneEntityCfg(
+                "robot", joint_names=[".*_Ankle_Roll"], preserve_order=True
+            ),
+            "foot_yaw_free_deg": 15.0,
+            "foot_yaw_scale_deg": 10.0,
+            "ankle_roll_free_deg": 12.0,
+            "ankle_roll_scale_deg": 10.0,
+            "ankle_roll_weight": 0.5,
         },
     )
     approach_time = RewTerm(func=mdp.alignment_time_penalty, weight=-0.25)
@@ -183,9 +198,14 @@ class RewardsCfg:
     # Keep the base and joint behavior compatible with kick_001's action
     # contract while allowing translational movement.
     base_height = RewTerm(
-        func=mdp.base_height_l2,
+        func=mdp.adjust_dynamic_base_height_l2,
         weight=-200.0,
-        params={"target_height": 0.55},
+        params={
+            "arrival_height": 0.55,
+            "travel_height_drop": 0.03,
+            "upright_error": 0.06,
+            "full_drop_error": 0.12,
+        },
     )
     orientation = RewTerm(func=mdp.flat_orientation_l2, weight=-20.0)
     lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.5)

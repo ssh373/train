@@ -15,7 +15,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, wrap_to_pi, yaw_quat
 
 # Keep the locomotion/kick observation and regularization terms available under
 # the same names used by kick_001.  Task-specific terms below are independent.
@@ -355,8 +355,8 @@ def alignment_position_progress(
 def step_progress_efficiency_reward(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
-    target_progress_per_step: float = 0.12,
-    maximum_progress_per_step: float = 0.24,
+    target_progress_per_step: float = 0.18,
+    maximum_progress_per_step: float = 0.30,
 ) -> torch.Tensor:
     """Reward large useful target progress per completed foot placement.
 
@@ -378,7 +378,11 @@ def step_progress_efficiency_reward(
     sensor = env.scene.sensors[sensor_cfg.name]
     touchdown = sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids].any(dim=1)
     progress = (last_error - current_error).clamp(0.0, maximum_progress_per_step)
-    efficiency = (progress / target_progress_per_step).clamp(0.0, 1.0).square()
+    # Do not saturate at the nominal target.  Productive progress keeps
+    # earning a super-linear return up to the configured maximum, so one 0.30 m
+    # placement is worth more than several small placements covering the same
+    # total distance.
+    efficiency = (progress / target_progress_per_step).square()
     reward = efficiency * touchdown.float()
     last_error[touchdown] = current_error[touchdown]
     return reward
@@ -495,10 +499,10 @@ def adjust_walking_quality(
     asset_cfg: SceneEntityCfg,
     target_air_time: float = 0.18,
     air_time_std: float = 0.10,
-    target_clearance: float = 0.045,
+    target_clearance: float = 0.055,
     clearance_std: float = 0.025,
     swing_speed_scale: float = 0.15,
-    minimum_swing_height: float = 0.025,
+    minimum_swing_height: float = 0.035,
     alignment_gate_error: float = 0.08,
 ) -> torch.Tensor:
     """Evaluate the complete moving gait state with one dense term.
@@ -586,6 +590,48 @@ def adjust_feet_lateral_spacing_penalty(
     return (lower_violation.square() + upper_violation.square()) * _adjust_gait_gate(env)
 
 
+def lower_leg_forward_alignment_penalty(
+    env: ManagerBasedRLEnv,
+    feet_cfg: SceneEntityCfg,
+    ankle_roll_cfg: SceneEntityCfg,
+    foot_yaw_free_deg: float = 15.0,
+    foot_yaw_scale_deg: float = 10.0,
+    ankle_roll_free_deg: float = 12.0,
+    ankle_roll_scale_deg: float = 10.0,
+    ankle_roll_weight: float = 0.5,
+) -> torch.Tensor:
+    """Softly keep both feet pointing forward without blocking useful steps.
+
+    K1 has no ankle-yaw joint, so visible toe-in/toe-out is generated mainly
+    by the hip-yaw chain.  Measuring each foot link relative to the trunk yaw
+    catches the resulting whole-leg twist directly.  A separate ankle-roll
+    guard prevents short corrections from being solved by folding an ankle.
+    Both guards have a free region and are penalties rather than action clips.
+    """
+
+    robot = env.scene[feet_cfg.name]
+    foot_quat = robot.data.body_quat_w[:, feet_cfg.body_ids]
+    w, x, y, z = foot_quat.unbind(-1)
+    foot_yaw = torch.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y.square() + z.square()),
+    )
+    yaw_error = torch.abs(wrap_to_pi(foot_yaw - robot.data.heading_w[:, None]))
+    yaw_violation = torch.relu(yaw_error - math.radians(foot_yaw_free_deg))
+    yaw_penalty = torch.mean(
+        (yaw_violation / math.radians(foot_yaw_scale_deg)).square(), dim=1
+    )
+
+    ankle_roll = torch.abs(robot.data.joint_pos[:, ankle_roll_cfg.joint_ids])
+    ankle_violation = torch.relu(
+        ankle_roll - math.radians(ankle_roll_free_deg)
+    )
+    ankle_penalty = torch.mean(
+        (ankle_violation / math.radians(ankle_roll_scale_deg)).square(), dim=1
+    )
+    return yaw_penalty + ankle_roll_weight * ankle_penalty
+
+
 def alignment_stillness_penalty(
     env: ManagerBasedRLEnv,
     alignment_scale: float = 0.10,
@@ -599,6 +645,31 @@ def alignment_stillness_penalty(
     planar_speed = torch.sum(robot.data.root_lin_vel_b[:, :2].square(), dim=1)
     yaw_speed = robot.data.root_ang_vel_b[:, 2].square()
     return near_goal * (planar_speed + yaw_weight * yaw_speed)
+
+
+def adjust_dynamic_base_height_l2(
+    env: ManagerBasedRLEnv,
+    arrival_height: float = 0.55,
+    travel_height_drop: float = 0.03,
+    upright_error: float = 0.06,
+    full_drop_error: float = 0.12,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Use a shallow travelling posture and recover the kick-entry height.
+
+    Far from the alignment point the target base height is lowered by roughly
+    3 cm to make a long push-off and swing placement easier.  It blends back
+    through the recovery band and is fully upright throughout the success
+    position tolerance instead of teaching a permanently crouched gait.
+    """
+
+    robot = env.scene[asset_cfg.name]
+    recovery_width = max(full_drop_error - upright_error, 1.0e-6)
+    travel_ratio = (
+        (alignment_position_error(env) - upright_error) / recovery_width
+    ).clamp(0.0, 1.0)
+    target_height = arrival_height - travel_height_drop * travel_ratio
+    return (robot.data.root_pos_w[:, 2] - target_height).square()
 
 
 def alignment_time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:

@@ -498,9 +498,16 @@ def kick_direction_accuracy(
     env: ManagerBasedRLEnv,
     target_xy: tuple[float, float] = (4.0, 0.0),
     minimum_speed: float = 0.05,
+    full_reward_angle_deg: float = 5.0,
+    zero_reward_angle_deg: float = 15.0,
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
-    """Signed cosine of velocity against the fixed desired launch direction."""
+    """Sharply reward ball velocity aligned with the fixed desired launch direction.
+
+    Alignment inside ``full_reward_angle_deg`` receives full reward.  The reward
+    then falls quadratically to zero at ``zero_reward_angle_deg``.  Kicks with a
+    component opposite to the desired direction remain negative.
+    """
     ball: RigidObject = env.scene[ball_cfg.name]
     target_w = _kick_target_w(env, target_xy)
     ball_start_xy = getattr(env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
@@ -508,14 +515,27 @@ def kick_direction_accuracy(
     direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp_min(1.0e-6)
     velocity = ball.data.root_lin_vel_w[:, :2]
     speed = torch.norm(velocity, dim=1)
-    direction_score = torch.sum(velocity * direction, dim=1) / speed.clamp_min(1.0e-6)
+    direction_cos = (
+        torch.sum(velocity * direction, dim=1) / speed.clamp_min(1.0e-6)
+    ).clamp(-1.0, 1.0)
+
+    full_angle = math.radians(full_reward_angle_deg)
+    zero_angle = math.radians(zero_reward_angle_deg)
+    if not 0.0 <= full_angle < zero_angle <= math.pi:
+        raise ValueError(
+            "Expected 0 <= full_reward_angle_deg < zero_reward_angle_deg <= 180, "
+            f"got {full_reward_angle_deg} and {zero_reward_angle_deg}."
+        )
+    full_cos = math.cos(full_angle)
+    zero_cos = math.cos(zero_angle)
+    precision = ((direction_cos - zero_cos) / (full_cos - zero_cos)).clamp(0.0, 1.0).square()
+    direction_score = torch.where(direction_cos < 0.0, direction_cos, precision)
     valid_kick = getattr(
         env, "_kick_valid_foot_kick",
         torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
     )
     active = valid_kick & (speed >= minimum_speed)
-    # Keep wrong-direction kicks negative instead of giving them zero reward.
-    return direction_score.clamp(-1.0, 1.0) * active.float()
+    return direction_score * active.float()
 
 
 def ball_overspeed(
@@ -653,6 +673,9 @@ def inside_foot_kick_quality(
     full_reward_angle_deg: float = 10.0,
     zero_reward_angle_deg: float = 20.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["left_foot_link", "right_foot_link"]),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "contact_forces", body_names=["left_foot_link", "right_foot_link"], preserve_order=True
+    ),
     ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
 ) -> torch.Tensor:
     """Score the inferred contact as an inside-foot kick at the kick event.
@@ -673,6 +696,7 @@ def inside_foot_kick_quality(
     nearest = torch.argmin(distances, dim=1)
     selected = torch.where(preferred >= 0, preferred, nearest)
     ids = torch.arange(env.num_envs, device=env.device)
+    support = 1 - selected.clamp(0, 1)
     foot_pos = feet_pos[ids, selected]
     foot_quat = feet_quat[ids, selected]
     foot_vel = feet_vel[ids, selected]
@@ -720,9 +744,20 @@ def inside_foot_kick_quality(
         return torch.zeros_like(ball_speed)
     kick_event = (ball_speed - env._kick_prev_ball_speed_inside) > speed_increase_threshold
     env._kick_prev_ball_speed_inside.copy_(ball_speed)
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    support_grounded = contacts[ids, support]
+    quality *= support_grounded.float()
     if not hasattr(env, "_kick_valid_foot_kick"):
         env._kick_valid_foot_kick = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    env._kick_valid_foot_kick |= kick_event & (distance < max_contact_distance)
+    env._kick_valid_foot_kick |= (
+        kick_event & (distance < max_contact_distance) & support_grounded
+    )
 
     # Range [-1, 1]: a poor/non-inside kick is penalized at the event.
     return (2.0 * quality - 1.0) * kick_event.float()
@@ -1064,6 +1099,21 @@ def support_foot_slide(
     support = torch.where(preferred >= 0, 1 - preferred.clamp(0, 1), 0)
     env_ids = torch.arange(env.num_envs, device=env.device)
     return foot_speed_xy[env_ids, support] * contacts[env_ids, support].float()
+
+
+def both_feet_airborne(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Return one while neither foot has meaningful contact support."""
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    contacts = (
+        contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+        .norm(dim=-1)
+        .max(dim=1)[0]
+        > 1.0
+    )
+    return (~contacts.any(dim=1)).float()
 
 
 def ball_success(
