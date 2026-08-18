@@ -181,7 +181,7 @@ class RewardsCfg:
 
     ball_velocity_target = RewTerm(
         func=mdp.ball_velocity_to_target,
-        weight=12.0,
+        weight=18.0,
         params={"target_xy": (4.0, 0.0), "decay_distance": 4.0, "max_reward": 10.0},
     )
     ball_target_accuracy = RewTerm(
@@ -271,7 +271,7 @@ class RewardsCfg:
     )
     ball_acceleration = RewTerm(
         func=mdp.ball_acceleration_to_target,
-        weight=0.5,
+        weight=1.0,
         params={"target_xy": (4.0, 0.0), "scale": 80.0},
     )
     waiting = RewTerm(func=mdp.waiting_penalty, weight=-12.0)
