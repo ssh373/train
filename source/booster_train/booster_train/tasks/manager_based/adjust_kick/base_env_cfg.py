@@ -133,10 +133,12 @@ class ObservationsCfg:
             clip=(-3.0, 3.0),
         )
         target_position = ObsTerm(
-            func=mdp.kick_target_pos_b,
+            # Policy gets direction only; target distance must not encourage
+            # unstable behavior when the ball/target range changes.
+            func=mdp.kick_ball_target_direction_b,
             params={"target_xy": (4.0, 0.0)},
-            scale=0.25,
-            clip=(-2.0, 2.0),
+            scale=1.0,
+            clip=(-1.0, 1.0),
         )
         ball_visible = ObsTerm(func=mdp.ball_visible)
         ball_time_since_seen = ObsTerm(func=mdp.ball_time_since_seen)
