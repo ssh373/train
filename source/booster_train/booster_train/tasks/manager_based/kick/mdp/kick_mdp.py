@@ -339,6 +339,9 @@ def reset_kick_target(
     world_angle = robot_yaw + relative_angle
     env._kick_target_w[env_ids, 0] = robot.data.root_pos_w[env_ids, 0] + distance * torch.cos(world_angle)
     env._kick_target_w[env_ids, 1] = robot.data.root_pos_w[env_ids, 1] + distance * torch.sin(world_angle)
+    if not hasattr(env, "_kick_start_yaw_w"):
+        env._kick_start_yaw_w = torch.zeros(env.num_envs, device=env.device)
+    env._kick_start_yaw_w[env_ids] = robot_yaw
 
     # Keep the preferred foot selected from the ball's lateral position in
     # ``reset_ball_in_front``: left-side ball -> left foot, right-side ball ->
@@ -949,6 +952,21 @@ def feet_too_close(
 def body_twist(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     robot: Articulation = env.scene[asset_cfg.name]
     return robot.data.root_ang_vel_b[:, 2].square()
+
+
+def body_yaw_deviation(
+    env: ManagerBasedRLEnv,
+    deadband_deg: float = 8.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize trunk heading changes beyond a small balance deadband."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    q = yaw_quat(robot.data.root_quat_w)
+    current_yaw = torch.atan2(2.0 * q[:, 0] * q[:, 3], 1.0 - 2.0 * q[:, 3].square())
+    start_yaw = getattr(env, "_kick_start_yaw_w", current_yaw.detach())
+    delta = torch.atan2(torch.sin(current_yaw - start_yaw), torch.cos(current_yaw - start_yaw))
+    deadband = math.radians(deadband_deg)
+    return (delta.abs() - deadband).clamp_min(0.0).square()
 
 
 def support_foot_slide(

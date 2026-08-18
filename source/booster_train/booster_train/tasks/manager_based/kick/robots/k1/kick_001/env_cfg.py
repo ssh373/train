@@ -177,7 +177,7 @@ class RewardsCfg:
     stationary_xy = RewTerm(func=mdp.stationary_base_xy, weight=0.1, params={"std": 0.5})
     # Yaw motion is allowed: the actor may twist its trunk to cover the full
     # +/-30 degree target range.
-    stationary_yaw = RewTerm(func=mdp.stationary_base_yaw, weight=0.02, params={"std": 0.5})
+    stationary_yaw = RewTerm(func=mdp.stationary_base_yaw, weight=0.10, params={"std": 0.5})
 
     ball_velocity_target = RewTerm(
         func=mdp.ball_velocity_to_target,
@@ -355,9 +355,14 @@ class RewardsCfg:
         weight=-20.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_Hip_Roll"])},
     )
-    # Moderately suppress rapid yaw-rate spikes while still allowing deliberate
-    # body rotation for angled kicks.
-    body_twist = RewTerm(func=mdp.body_twist, weight=-2.0)
+    # Suppress both rapid yaw-rate swings and slow whole-body turns. Small
+    # heading changes remain available for balance.
+    body_twist = RewTerm(func=mdp.body_twist, weight=-6.0)
+    body_yaw_deviation = RewTerm(
+        func=mdp.body_yaw_deviation,
+        weight=-8.0,
+        params={"deadband_deg": 8.0},
+    )
 
 
 @configclass
