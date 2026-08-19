@@ -149,15 +149,17 @@ def _ready_latch(
     max_foot_ball_distance: float = 0.25,
     foot_lateral_tolerance: float = 0.16,
     minimum_foot_forward_distance: float = 0.0,
+    require_foot_geometry: bool = False,
 ) -> torch.Tensor:
     """Latch entry into the kickable sector, rather than one exact pose.
 
     ``position_tolerance`` is retained for compatibility with older configs,
     but the handoff gate is now defined by the kick teacher's usable region:
     radial robot-ball distance, target-relative lateral offset, ball-in-front
-    geometry, target-heading tolerance, and the selected kicking foot's
-    distance/position relative to the ball. Once latched, the state machine
-    never falls back to adjust during the same episode.
+    geometry, and target-heading tolerance. The selected kicking foot's
+    geometry is recorded for diagnostics, but is not required by default:
+    the kick teacher creates the foot-to-ball swing after handoff. Once
+    latched, the state machine never falls back to adjust during the episode.
     """
     if not hasattr(env, "_adjust_ready_latched"):
         env._adjust_ready_latched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -183,7 +185,7 @@ def _ready_latch(
     perpendicular_w = torch.stack((-direction_w[:, 1], direction_w[:, 0]), dim=1)
     lateral_offset = torch.abs(torch.sum(robot_delta * perpendicular_w, dim=1))
     ball_b = kick_mdp.ball_pos_b(env)
-    ready_now = (
+    body_ready = (
         (heading_error.abs() <= math.radians(heading_tolerance_deg))
         & (ball_speed <= ball_speed_tolerance)
         & (robot_ball_distance >= min_robot_ball_distance)
@@ -234,7 +236,15 @@ def _ready_latch(
         & (selected_delta_b_x >= minimum_foot_forward_distance)
         & (selected_delta_b_y.abs() <= foot_lateral_tolerance)
     )
-    ready_now &= foot_ready
+    # Keep the breakdown available to the action-term debug line.  This makes
+    # a stalled handoff immediately distinguishable from a bad teacher.
+    env._adjust_gate_body = body_ready
+    env._adjust_gate_foot = foot_ready
+    env._adjust_gate_foot_distance = selected_distance
+    env._adjust_gate_foot_lateral = selected_delta_b_y.abs()
+    env._adjust_gate_ball_speed = ball_speed
+    env._adjust_gate_ball_forward = ball_b[:, 0]
+    ready_now = body_ready & foot_ready if require_foot_geometry else body_ready
     transition_active = getattr(
         env,
         "_adjust_transition_active",

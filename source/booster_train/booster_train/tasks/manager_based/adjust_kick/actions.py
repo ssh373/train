@@ -227,6 +227,7 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
                 max_foot_ball_distance=self.cfg.maximum_foot_ball_distance,
                 foot_lateral_tolerance=self.cfg.ready_foot_lateral_tolerance,
                 minimum_foot_forward_distance=self.cfg.minimum_foot_forward_distance,
+                require_foot_geometry=self.cfg.require_foot_geometry,
             )
             start_transition = adjust_mask & ready
             self._phase[start_transition] = self.TRANSITION
@@ -287,6 +288,19 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
             f"student_teacher_rmse={imitation_rmse.item():.4f}",
             flush=True,
         )
+        body_gate = getattr(self._env, "_adjust_gate_body", None)
+        foot_gate = getattr(self._env, "_adjust_gate_foot", None)
+        foot_distance = getattr(self._env, "_adjust_gate_foot_distance", None)
+        foot_lateral = getattr(self._env, "_adjust_gate_foot_lateral", None)
+        if body_gate is not None and foot_gate is not None:
+            print(
+                "[ADJUST_KICK_GATE] "
+                f"body={body_gate.float().mean().item():.2f} "
+                f"foot={foot_gate.float().mean().item():.2f} "
+                f"foot_dist={foot_distance.mean().item():.3f}m "
+                f"foot_lat={foot_lateral.mean().item():.3f}m",
+                flush=True,
+            )
 
     def process_actions(self, actions: torch.Tensor) -> None:
         super().process_actions(actions)
@@ -367,9 +381,12 @@ class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
     minimum_ball_forward_distance: float = 0.10
     # Immediate kick handoff uses the selected foot, not only the robot root.
     minimum_foot_ball_distance: float = 0.04
-    maximum_foot_ball_distance: float = 0.25
-    ready_foot_lateral_tolerance: float = 0.16
-    minimum_foot_forward_distance: float = 0.0
+    maximum_foot_ball_distance: float = 0.40
+    ready_foot_lateral_tolerance: float = 0.22
+    minimum_foot_forward_distance: float = -0.05
+    # The kick teacher moves the foot into contact after handoff. Requiring
+    # contact geometry here would prevent that handoff from ever occurring.
+    require_foot_geometry: bool = False
     # A short transition preserves the validated adjust/kick contact timing
     # while avoiding a discontinuous joint target at handoff.
     # Three 50 Hz control steps: visually immediate, but long enough for the

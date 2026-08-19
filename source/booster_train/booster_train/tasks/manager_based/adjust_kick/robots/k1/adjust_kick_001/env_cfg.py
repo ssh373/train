@@ -55,6 +55,9 @@ class ActionsCfg:
         maximum_ball_displacement=0.04,
         ready_lateral_tolerance=0.18,
         minimum_ball_forward_distance=0.10,
+        # The kick teacher moves the foot after handoff; do not wait for
+        # contact geometry before activating it.
+        require_foot_geometry=False,
         transition_duration_s=0.06,
         rollin_stage_steps=(120_000, 300_000, 600_000),
         teacher_control_blend=(1.0, 0.99, 0.90, 0.0),
