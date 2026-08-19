@@ -368,6 +368,10 @@ def reset_ball_in_front(
     if hasattr(env, "_kick_happened"):
         env._kick_happened[env_ids] = False
         env._kick_recovery_time[env_ids] = 0.0
+    if hasattr(env, "_kick_launch_speed"):
+        env._kick_launch_speed[env_ids] = 0.0
+    if hasattr(env, "_kick_launch_direction_score"):
+        env._kick_launch_direction_score[env_ids] = -1.0
     if hasattr(env, "_kick_target_achieved"):
         env._kick_target_achieved[env_ids] = False
     if hasattr(env, "_kick_recovery_stable_time"):
@@ -1008,13 +1012,25 @@ def post_kick_recovery(
     if not hasattr(env, "_kick_happened"):
         env._kick_happened = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._kick_recovery_time = torch.zeros(env.num_envs, device=env.device)
+        env._kick_launch_speed = torch.zeros(env.num_envs, device=env.device)
+        env._kick_launch_direction_score = torch.full(
+            (env.num_envs,), -1.0, device=env.device
+        )
 
     valid_foot_kick = getattr(
         env, "_kick_valid_foot_kick", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     )
-    env._kick_happened |= valid_foot_kick & (
-        torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1) > kick_speed_threshold
-    )
+    velocity = ball.data.root_lin_vel_w[:, :2]
+    speed = torch.norm(velocity, dim=1)
+    target_w = _kick_target_w(env, (4.0, 0.0))
+    direction = target_w - ball.data.root_pos_w[:, :2]
+    direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp_min(1.0e-6)
+    direction_score = torch.sum(velocity * direction, dim=1) / speed.clamp_min(1.0e-6)
+    launch = valid_foot_kick & (speed > kick_speed_threshold)
+    first_launch = launch & ~env._kick_happened
+    env._kick_launch_speed[first_launch] = speed[first_launch]
+    env._kick_launch_direction_score[first_launch] = direction_score[first_launch]
+    env._kick_happened |= launch
     env._kick_recovery_time += env._kick_happened.float() * env.step_dt
 
     joint_speed = torch.mean(robot.data.joint_vel.square(), dim=1)

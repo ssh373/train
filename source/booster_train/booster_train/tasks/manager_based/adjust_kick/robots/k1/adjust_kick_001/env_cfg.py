@@ -83,17 +83,15 @@ class RewardsCfg(KickRewardsCfg):
     ball_velocity_target = RewTerm(func=mdp.gated_kick_velocity, weight=10.0)
     kick_speed_target = RewTerm(
         func=mdp.direction_gated_kick_speed,
-        weight=12.0,
+        weight=20.0,
         params={"target_speed": 3.0, "min_direction_score": 0.98},
     )
-    # Kick speed itself is not penalized in this task; direction and target
-    # accuracy are the objectives. The original kick task remains unchanged.
+    # Do not reward eventual arrival at the distant target point. Speed and
+    # launch direction are evaluated immediately after contact instead.
     ball_overspeed = None
-    # Match kick_001's target-distance shaping while keeping a stricter final
-    # direction condition in the success termination below.
-    ball_target_accuracy = RewTerm(func=mdp.gated_kick_accuracy, weight=20.0, params={"std": 0.25})
+    ball_target_accuracy = None
     kick_direction_accuracy = RewTerm(
-        func=mdp.kick_direction_accuracy, weight=25.0, params={"minimum_speed": 0.05}
+        func=mdp.kick_direction_accuracy, weight=35.0, params={"minimum_speed": 0.05}
     )
     ball_lateral_velocity = RewTerm(func=mdp.gated_kick_lateral_velocity, weight=-20.0)
     kicking_foot_approach = RewTerm(
@@ -192,8 +190,9 @@ class RewardsCfg(KickRewardsCfg):
     post_kick_recovery = RewTerm(
         func=kick_mdp.post_kick_recovery,
         weight=4.0,
-        # Require a meaningful ball launch before entering recovery.
-        params={"kick_speed_threshold": 0.5},
+        # A valid foot-contact event plus this launch speed is enough to enter
+        # recovery; waiting for the ball to reach the distant target is not.
+        params={"kick_speed_threshold": 0.20},
     )
     walk_ready_after_kick = RewTerm(
         func=kick_mdp.walk_ready_after_kick,
@@ -214,16 +213,17 @@ class RewardsCfg(KickRewardsCfg):
 
 @configclass
 class TerminationsCfg(KickTerminationsCfg):
+    # A combined episode is one approach -> one kick -> recovery sequence.
+    kick_complete = DoneTerm(
+        func=mdp.kick_recovery_complete,
+        params={"recovery_time": 0.8},
+    )
     kick_success = DoneTerm(
-        func=mdp.adjusted_ball_success,
+        func=mdp.kick_quality_success,
         params={
-            "target_xy": (4.0, 0.0),
-            "target_radius": 0.15,
-            # About +/-5.7 degrees from the initial ball-to-target vector.
-            "min_direction_score": 0.998,
-            # No practical arrival-speed cap: direction and target position
-            # determine success for this task.
-            "max_speed": 100.0,
+            "minimum_speed": 1.5,
+            # About +/-11.5 degrees from the desired launch direction.
+            "min_direction_score": 0.98,
             "recovery_time": 0.8,
             "max_base_speed": 0.35,
             "max_tilt": 0.2,
@@ -397,7 +397,9 @@ class K1AdjustKickTransitionEnvCfg(K1AdjustKickEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.actions.joint_pos.control_mode = "transition"
-        self.actions.joint_pos.transition_residual_scale = 0.12
+        # Start with a small correction envelope: the frozen teachers must
+        # dominate until the transition actor has learned a safe residual.
+        self.actions.joint_pos.transition_residual_scale = 0.04
         self.observations.policy.transition_progress = ObsTerm(
             func=kick_mdp.transition_phase_progress,
             clip=(-1.0, 2.0),

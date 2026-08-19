@@ -368,7 +368,9 @@ class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
     # ``transition`` means PPO controls only a bounded residual in the handoff;
     # adjust and kick remain frozen teacher outputs.
     control_mode: str = "student"
-    transition_residual_scale: float = 0.12
+    # Conservative while the residual actor is still randomly initialized;
+    # the frozen teachers should remain the dominant command source.
+    transition_residual_scale: float = 0.04
 
     rollin_stage_steps: tuple[int, int, int] = (120_000, 300_000, 600_000)
     teacher_control_blend: tuple[float, float, float, float] = (1.0, 0.99, 0.90, 0.0)

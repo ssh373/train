@@ -514,6 +514,80 @@ def adjusted_ball_success(
     return success & _ready_latch(env)
 
 
+def kick_quality_success(
+    env: ManagerBasedRLEnv,
+    minimum_speed: float = 1.5,
+    min_direction_score: float = 0.98,
+    recovery_time: float = 0.8,
+    max_base_speed: float = 0.35,
+    max_tilt: float = 0.2,
+    max_mean_joint_deviation: float = 0.35,
+) -> torch.Tensor:
+    """Evaluate a kick from launch speed/direction, not distant target arrival."""
+    launch_speed = getattr(
+        env,
+        "_kick_launch_speed",
+        torch.zeros(env.num_envs, device=env.device),
+    )
+    launch_direction_score = getattr(
+        env,
+        "_kick_launch_direction_score",
+        torch.full((env.num_envs,), -1.0, device=env.device),
+    )
+    kick_happened = getattr(
+        env,
+        "_kick_happened",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    recovery_elapsed = getattr(
+        env,
+        "_kick_recovery_time",
+        torch.zeros(env.num_envs, device=env.device),
+    )
+    robot: Articulation = env.scene["robot"]
+    base_speed = torch.norm(robot.data.root_lin_vel_b[:, :2], dim=1)
+    tilt = torch.norm(robot.data.projected_gravity_b[:, :2], dim=1)
+    mean_joint_deviation = torch.mean(
+        torch.abs(robot.data.joint_pos - robot.data.default_joint_pos), dim=1
+    )
+    return (
+        kick_happened
+        & (launch_speed >= minimum_speed)
+        & (launch_direction_score >= min_direction_score)
+        & (recovery_elapsed >= recovery_time)
+        & (base_speed <= max_base_speed)
+        & (tilt <= max_tilt)
+        & (mean_joint_deviation <= max_mean_joint_deviation)
+    )
+
+
+def kick_recovery_complete(
+    env: ManagerBasedRLEnv,
+    recovery_time: float = 0.8,
+) -> torch.Tensor:
+    """End a one-kick episode after launch and post-kick recovery.
+
+    ``post_kick_recovery`` already latches a valid ball launch in
+    ``_kick_happened`` and accumulates ``_kick_recovery_time``.  The previous
+    task only used those values for reward and waited for the ball to travel
+    all the way to the 4 m target before resetting.  That allowed the frozen
+    kick teacher to be called repeatedly after contact.  This separate
+    termination keeps target accuracy as a metric while making the control
+    episode represent exactly one kick plus recovery.
+    """
+    kick_happened = getattr(
+        env,
+        "_kick_happened",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    elapsed = getattr(
+        env,
+        "_kick_recovery_time",
+        torch.zeros(env.num_envs, device=env.device),
+    )
+    return kick_happened & (elapsed >= recovery_time)
+
+
 def adjusted_ball_not_kicked(
     env: ManagerBasedRLEnv,
     time_limit: float = 2.5,

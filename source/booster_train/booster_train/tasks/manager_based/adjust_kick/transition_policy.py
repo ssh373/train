@@ -27,7 +27,7 @@ class FrozenExpertsLearnedTransitionPolicy(torch.nn.Module):
         maximum_ball_distance: float = 0.40,
         transition_duration_s: float = 0.20,
         minimum_ball_confidence: float = 0.05,
-        transition_residual_scale: float = 0.12,
+        transition_residual_scale: float = 0.04,
         ready_lateral_tolerance: float = 0.18,
         minimum_ball_forward_distance: float = 0.10,
     ) -> None:
