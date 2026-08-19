@@ -511,6 +511,46 @@ def reset_kick_target(
         env._kick_target_visualizer.visualize(marker_positions)
 
 
+def visualize_kick_ready_point(
+    env: ManagerBasedEnv,
+    standoff: float = 0.30,
+    radius: float = 0.10,
+) -> None:
+    """Draw the blue robot arrival point behind the ball.
+
+    The red marker is the ball's final launch target. This separate blue
+    marker is the point the robot should reach before entering kick phase:
+    ``ball - 0.30 m * target_direction``.
+    """
+    if not hasattr(env, "_kick_ready_visualizer"):
+        env._kick_ready_visualizer = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path="/Visuals/Kick/ready_point",
+                markers={
+                    "ready": sim_utils.CylinderCfg(
+                        radius=radius,
+                        height=0.025,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.05, 0.25, 1.0),
+                            emissive_color=(0.01, 0.08, 0.65),
+                        ),
+                    )
+                },
+            )
+        )
+
+    ball: RigidObject = env.scene["ball"]
+    direction = getattr(
+        env,
+        "_kick_direction_w",
+        torch.zeros(env.num_envs, 2, device=env.device),
+    )
+    marker_positions = torch.zeros(env.num_envs, 3, device=env.device)
+    marker_positions[:, :2] = ball.data.root_pos_w[:, :2] - standoff * direction
+    marker_positions[:, 2] = env.scene.env_origins[:, 2] + 0.014
+    env._kick_ready_visualizer.visualize(marker_positions)
+
+
 def survival(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.ones(env.num_envs, device=env.device)
 

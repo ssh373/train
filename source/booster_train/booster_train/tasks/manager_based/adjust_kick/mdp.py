@@ -69,6 +69,12 @@ def reset_adjust_kick_scenario(
         target_radius=target_radius,
         origin_at_ball=True,
     )
+    if visualize_target:
+        kick_mdp.visualize_kick_ready_point(
+            env,
+            standoff=0.30,
+            radius=0.10,
+        )
 
     count = env.num_envs
     device = env.device

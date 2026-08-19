@@ -62,11 +62,14 @@ python source/booster_train/booster_train/tasks/manager_based/adjust_kick/play_u
   --num_envs 16
 ```
 
-The attached source YAMLs use different simulator assets: adjust uses
-`K1_jy_locomotion.urdf` and kick uses `K1_locomotion.urdf`. The player accepts
-`--robot_urdf /absolute/path.urdf` so both can be evaluated explicitly. The
-default unified environment keeps the kick asset because foot-ball contact and
-post-kick recovery are the more sensitive phases.
+The historical attached source YAMLs used different simulator assets: adjust
+used `K1_jy_locomotion.urdf` and kick used `K1_locomotion.urdf`. The current
+Unified environment explicitly uses `K1_locomotion.urdf` for the robot. Thus
+the supplied historical adjust teacher is only a training reference on a
+different dynamics model; it is not a 99%-preserved adjust motion on the
+current robot. For a reliable final policy, retrain adjust and kick on the
+same `K1_locomotion.urdf`, then retrain Unified. The player accepts
+`--robot_urdf /absolute/path.urdf` for explicit asset checks.
 
 At deployment call `forward(obs)` with the shared 49-value observation and
 call `reset(mask)` whenever a new BT adjust-kick behavior starts. If control is
@@ -101,21 +104,18 @@ The one actor receives the shared 49 values plus one explicit phase/progress
 value during training. The exported stateful wrapper appends that value
 internally, so deployment still receives only the original 49 values.
 
-The attached source configs used different URDF filenames (`K1_jy_locomotion`
-for adjust and `K1_locomotion` for kick). Their joint order, 12-D action scale,
-default leg pose, and 49-D actor contract match. The unified task intentionally
-uses the kick run's `K1_locomotion.urdf` and ball material because foot-ball
-contact is the less forgiving part. Both assets must be checked explicitly in
-Play; matching filenames or one-step imitation percentages are not sufficient.
+The historical source configs used different URDF filenames, although their
+joint order and 49-D/12-D contracts match. The Unified task currently uses
+`K1_locomotion.urdf`; matching filenames or one-step imitation percentages are
+not sufficient when contact and balance dynamics differ.
 
-When both motions are later trained on the common `K1_locomotion.urdf`, a new
-compatible adjust actor can replace `models/adjust_teacher.pt` (or be selected
-with `ADJUST_KICK_ADJUST_TEACHER_JIT`). If the kick actor is unchanged and the
-49-observation, 12-action, joint order, default pose, and action scales remain
-identical, only the adjust teacher needs replacing for the training reference.
-The unified actor must then be retrained and re-exported because its
-boundary-state distribution changed. If either contract changes, both the
-environment and actor input/output contract must be updated.
+When both motions are retrained on the common `K1_locomotion.urdf`, point the
+teacher paths at those new files (or use
+`ADJUST_KICK_ADJUST_TEACHER_JIT`/`ADJUST_KICK_KICK_TEACHER_JIT`) and retrain
+Unified. The old integrated PT must not be reused after changing URDF. Even
+if the 49-observation, 12-action, joint order, default pose, and action scales
+remain identical, the actor must be retrained because contact and balance
+dynamics changed.
 
 The nominal robot-to-ball distance is `0.30 m`. The exported unified policy
 enters its transition when the desired behind-ball pose is within `0.08 m`, heading is

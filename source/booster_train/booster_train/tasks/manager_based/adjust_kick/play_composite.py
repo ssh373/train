@@ -19,6 +19,11 @@ parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--steps", type=int, default=5000)
 parser.add_argument("--robot_urdf", default=None)
 parser.add_argument("--real_time", action="store_true")
+parser.add_argument(
+    "--teacher_control",
+    action="store_true",
+    help="Diagnostic mode: let frozen training teachers control the robot.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -49,9 +54,12 @@ def main(env_cfg, agent_cfg) -> None:
         env_cfg.scene.robot.spawn.asset_path = os.path.abspath(
             os.path.expanduser(args_cli.robot_urdf)
         )
-    # The composite action must reach the robot unchanged.  The action term's
-    # teacher computation remains available for diagnostics but has zero blend.
-    env_cfg.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
+    if args_cli.teacher_control:
+        env_cfg.actions.joint_pos.teacher_control_blend = (1.0, 1.0, 1.0, 1.0)
+    else:
+        # The learned unified action must reach the robot unchanged. Teacher
+        # computation remains available for diagnostics but has zero blend.
+        env_cfg.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
     env_cfg.actions.joint_pos.debug_transition = False
 
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -69,7 +77,10 @@ def main(env_cfg, agent_cfg) -> None:
 
     print(f"[composite-play] policy: {policy_path}")
     print(f"[composite-play] robot asset: {env_cfg.scene.robot.spawn.asset_path}")
-    print("[unified-play] phases: 0=adjust, 1=0.2s transition, 2=kick/recovery")
+    print(
+        "[unified-play] phases: 0=adjust, 1=0.2s transition, 2=kick/recovery "
+        f"teacher_control={args_cli.teacher_control}"
+    )
 
     step = 0
     dt = raw_env.step_dt
