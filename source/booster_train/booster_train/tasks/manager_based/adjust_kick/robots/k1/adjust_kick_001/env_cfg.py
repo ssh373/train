@@ -294,8 +294,17 @@ class K1AdjustKickPlayEnvCfg(K1AdjustKickEnvCfg):
             0,
         )
         self.events.reset_scenario.params["visualize_target"] = True
-        # Play evaluates the exported single actor without teacher roll-in.
-        self.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
+        # Play defaults to student-only. For an intermediate diagnostic, set
+        # ADJUST_KICK_PLAY_TEACHER_BLEND to a value in [0, 1].
+        teacher_blend = float(os.environ.get("ADJUST_KICK_PLAY_TEACHER_BLEND", "0.0"))
+        if not 0.0 <= teacher_blend <= 1.0:
+            raise ValueError("ADJUST_KICK_PLAY_TEACHER_BLEND must be in [0, 1]")
+        self.actions.joint_pos.teacher_control_blend = (
+            teacher_blend,
+            teacher_blend,
+            teacher_blend,
+            teacher_blend,
+        )
         self.actions.joint_pos.debug_transition = True
 
 
@@ -345,5 +354,13 @@ class K1AdjustKickUnifiedPlayEnvCfg(K1AdjustKickUnifiedEnvCfg):
         self.scene.num_envs = 16
         self.events.reset_scenario.params["stage_steps"] = (0, 0, 0, 0)
         self.events.reset_scenario.params["visualize_target"] = True
-        self.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
+        teacher_blend = float(os.environ.get("ADJUST_KICK_PLAY_TEACHER_BLEND", "0.0"))
+        if not 0.0 <= teacher_blend <= 1.0:
+            raise ValueError("ADJUST_KICK_PLAY_TEACHER_BLEND must be in [0, 1]")
+        self.actions.joint_pos.teacher_control_blend = (
+            teacher_blend,
+            teacher_blend,
+            teacher_blend,
+            teacher_blend,
+        )
         self.actions.joint_pos.debug_transition = True
