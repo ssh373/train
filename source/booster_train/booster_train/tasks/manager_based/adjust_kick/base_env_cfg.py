@@ -83,7 +83,7 @@ class KickSceneCfg(InteractiveSceneCfg):
                 # Match the validated kick_001 ball-roll physics.
                 static_friction=0.4,
                 dynamic_friction=0.3,
-                restitution=0.08,
+                restitution=0.0,
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",
             ),
@@ -123,10 +123,6 @@ class ObservationsCfg:
                 "ball_cfg": SceneEntityCfg("ball"),
                 "base_noise_std": 0.03,
                 "distance_noise_ratio": 0.02,
-                # Correlated camera bias models head/body motion and tracking
-                # drift; it persists longer than one observation frame.
-                "temporal_bias_std": 0.035,
-                "temporal_bias_tau_s": 0.18,
                 "dropout_rate_per_s": 0.50,
                 "dropout_duration_range": (0.08, 0.30),
             },

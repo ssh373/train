@@ -50,10 +50,43 @@ def ball_position_camera_b(
     distance_noise_ratio: float = 0.02,
     dropout_rate_per_s: float = 0.50,
     dropout_duration_range: tuple[float, float] = (0.08, 0.30),
+    camera_bias_range: tuple[float, float] = (-0.015, 0.015),
+    camera_latency_s: float = 0.06,
 ) -> torch.Tensor:
-    """Use the same camera-like ball observation contract as kick_001."""
+    """Return a noisy, biased and delayed camera-like ball observation.
 
-    return _kick_mdp.camera_ball_pos_b(
+    The bias is sampled once per episode and expressed in the robot yaw frame,
+    which approximates a small camera calibration error.  The delayed output
+    is shared by the position/visibility/age/confidence observation terms so
+    the actor sees one internally consistent camera frame.  The observation
+    dimensionality remains identical to ``kick_001``.
+    """
+
+    return _adjust_camera_observation(
+        env,
+        ball_cfg=ball_cfg,
+        base_noise_std=base_noise_std,
+        distance_noise_ratio=distance_noise_ratio,
+        dropout_rate_per_s=dropout_rate_per_s,
+        dropout_duration_range=dropout_duration_range,
+        camera_bias_range=camera_bias_range,
+        camera_latency_s=camera_latency_s,
+    )[0]
+
+
+def _adjust_camera_observation(
+    env: ManagerBasedEnv,
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    base_noise_std: float = 0.03,
+    distance_noise_ratio: float = 0.02,
+    dropout_rate_per_s: float = 0.50,
+    dropout_duration_range: tuple[float, float] = (0.08, 0.30),
+    camera_bias_range: tuple[float, float] = (-0.015, 0.015),
+    camera_latency_s: float = 0.06,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build one shared delayed camera frame for all camera observation terms."""
+
+    raw_pos, raw_visible, raw_age, raw_confidence = _kick_mdp._camera_ball_observation(
         env,
         ball_cfg=ball_cfg,
         base_noise_std=base_noise_std,
@@ -61,6 +94,85 @@ def ball_position_camera_b(
         dropout_rate_per_s=dropout_rate_per_s,
         dropout_duration_range=dropout_duration_range,
     )
+
+    latency_steps = max(0, int(math.ceil(camera_latency_s / env.step_dt)))
+    history_length = max(1, latency_steps + 1)
+    history_shape_changed = (
+        not hasattr(env, "_adjust_camera_pos_history")
+        or env._adjust_camera_pos_history.shape[1] != history_length
+    )
+    if history_shape_changed:
+        env._adjust_camera_bias = torch.zeros(env.num_envs, 2, device=env.device)
+        env._adjust_camera_pos_history = torch.zeros(
+            env.num_envs, history_length, 2, device=env.device
+        )
+        env._adjust_camera_visible_history = torch.zeros(
+            env.num_envs, history_length, 1, dtype=torch.bool, device=env.device
+        )
+        env._adjust_camera_age_history = torch.zeros(
+            env.num_envs, history_length, 1, device=env.device
+        )
+        env._adjust_camera_confidence_history = torch.zeros(
+            env.num_envs, history_length, 1, device=env.device
+        )
+        env._adjust_camera_last_episode_length = torch.full(
+            (env.num_envs,), -1, dtype=env.episode_length_buf.dtype, device=env.device
+        )
+
+    # Observation terms are evaluated separately.  Update the delay line only
+    # once per environment step, then let all four terms read the same frame.
+    if not torch.equal(env._adjust_camera_last_episode_length, env.episode_length_buf):
+        reset = env.episode_length_buf <= 1
+        if reset.any():
+            low, high = camera_bias_range
+            env._adjust_camera_bias[reset] = torch.empty(
+                (int(reset.sum().item()), 2), device=env.device
+            ).uniform_(low, high)
+
+        measured_pos = raw_pos + env._adjust_camera_bias
+        env._adjust_camera_pos_history[:, 1:] = env._adjust_camera_pos_history[:, :-1].clone()
+        env._adjust_camera_visible_history[:, 1:] = env._adjust_camera_visible_history[:, :-1].clone()
+        env._adjust_camera_age_history[:, 1:] = env._adjust_camera_age_history[:, :-1].clone()
+        env._adjust_camera_confidence_history[:, 1:] = (
+            env._adjust_camera_confidence_history[:, :-1].clone()
+        )
+        env._adjust_camera_pos_history[:, 0] = measured_pos
+        env._adjust_camera_visible_history[:, 0] = raw_visible.bool()
+        env._adjust_camera_age_history[:, 0] = raw_age
+        env._adjust_camera_confidence_history[:, 0] = raw_confidence
+
+        # At reset there is no history yet.  Fill it with the first frame so
+        # latency does not create an artificial zero-ball observation.
+        if reset.any():
+            env._adjust_camera_pos_history[reset] = measured_pos[reset].unsqueeze(1)
+            env._adjust_camera_visible_history[reset] = raw_visible.bool()[reset].unsqueeze(1)
+            env._adjust_camera_age_history[reset] = raw_age[reset].unsqueeze(1)
+            env._adjust_camera_confidence_history[reset] = raw_confidence[reset].unsqueeze(1)
+
+        env._adjust_camera_last_episode_length.copy_(env.episode_length_buf)
+
+    delayed = min(latency_steps, history_length - 1)
+    age = (
+        env._adjust_camera_age_history[:, delayed] + camera_latency_s
+    ).clamp(0.0, 0.3)
+    return (
+        env._adjust_camera_pos_history[:, delayed],
+        env._adjust_camera_visible_history[:, delayed].float(),
+        age,
+        env._adjust_camera_confidence_history[:, delayed],
+    )
+
+
+def adjust_ball_visible(env: ManagerBasedEnv) -> torch.Tensor:
+    return _adjust_camera_observation(env)[1]
+
+
+def adjust_ball_time_since_seen(env: ManagerBasedEnv) -> torch.Tensor:
+    return _adjust_camera_observation(env)[2]
+
+
+def adjust_ball_confidence(env: ManagerBasedEnv) -> torch.Tensor:
+    return _adjust_camera_observation(env)[3]
 
 
 def target_direction_b(env: ManagerBasedEnv) -> torch.Tensor:

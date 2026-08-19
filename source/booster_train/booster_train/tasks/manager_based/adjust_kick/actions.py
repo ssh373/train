@@ -1,10 +1,14 @@
-"""Frozen-walk/learned-adjust action composition for the standalone task."""
+"""Frozen adjust/kick teacher composition for transition distillation.
+
+Both supplied teachers use the same 49-observation and 12-action contract. The
+action term keeps their ``last_action`` slots independent, produces a smooth
+teacher target at the adjust-to-kick boundary, and optionally rolls that target
+into the simulator while a single student actor learns it.
+"""
 
 from __future__ import annotations
 
-import math
 import os
-import re
 from dataclasses import MISSING
 from typing import TYPE_CHECKING
 
@@ -13,401 +17,299 @@ from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
 from isaaclab.envs.mdp.actions.joint_actions import JointPositionAction
 from isaaclab.utils import configclass
 
-from booster_train.assets.robots.booster import K1_ACTION_SCALE
-
-from .mdp import (
-    _adjust_geometry,
-    _ready_latch,
-    approach_heading_error,
-    facing_translation_scale,
-)
-from .standalone_mdp import ball_pos_b, kick_target_pos_b
+from .mdp import _adjust_geometry, _ready_latch
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
-class FrozenWalkAdjustAction(JointPositionAction):
-    """Execute the frozen walk teacher until the close-adjust boundary is reached."""
+class FrozenAdjustKickTransitionAction(JointPositionAction):
+    """Distill two frozen 49-to-12 policies into one feed-forward actor."""
 
-    cfg: "FrozenWalkAdjustActionCfg"
+    cfg: "FrozenAdjustKickTransitionActionCfg"
 
-    def __init__(self, cfg: "FrozenWalkAdjustActionCfg", env: "ManagerBasedEnv") -> None:
+    ADJUST = 0
+    TRANSITION = 1
+    KICK = 2
+
+    def __init__(self, cfg: "FrozenAdjustKickTransitionActionCfg", env: "ManagerBasedEnv") -> None:
         super().__init__(cfg, env)
-        teacher_path = os.path.expanduser(os.environ.get(cfg.teacher_env_var, cfg.teacher_path))
-        if not os.path.isfile(teacher_path):
+        self._adjust_teacher = self._load_teacher(
+            cfg.adjust_teacher_path, cfg.adjust_teacher_env_var, "adjust"
+        )
+        self._kick_teacher = self._load_teacher(
+            cfg.kick_teacher_path, cfg.kick_teacher_env_var, "kick"
+        )
+
+        shape = (self.num_envs, self.action_dim)
+        self._adjust_last_action = torch.zeros(shape, device=self.device)
+        self._kick_last_action = torch.zeros(shape, device=self.device)
+        self._teacher_action = torch.zeros(shape, device=self.device)
+        self._adjust_teacher_action = torch.zeros(shape, device=self.device)
+        self._kick_teacher_action = torch.zeros(shape, device=self.device)
+        self._student_action = torch.zeros(shape, device=self.device)
+        self._student_processed_actions = torch.zeros(shape, device=self.device)
+        self._teacher_processed_actions = torch.zeros(shape, device=self.device)
+        self._phase = torch.full(
+            (self.num_envs,), self.ADJUST, dtype=torch.long, device=self.device
+        )
+        self._transition_elapsed = torch.zeros(self.num_envs, device=self.device)
+        self._transition_alpha = torch.zeros(self.num_envs, device=self.device)
+        self._env._adjust_transition_active = self._phase == self.TRANSITION
+
+    def _load_teacher(self, configured_path: str, env_var: str, label: str):
+        path = os.path.abspath(os.path.expanduser(os.environ.get(env_var, configured_path)))
+        if not os.path.isfile(path):
             raise FileNotFoundError(
-                f"Frozen walk teacher not found at {teacher_path!r}. "
-                f"Set {cfg.teacher_env_var} to a compatible 54-to-12 TorchScript policy."
+                f"Frozen {label} teacher not found at {path!r}. Set {env_var} "
+                "to a compatible 49-to-12 TorchScript policy."
             )
-        self._teacher = torch.jit.load(teacher_path, map_location=self.device).eval()
+        teacher = torch.jit.load(path, map_location=self.device).eval()
         with torch.inference_mode():
-            probe = self._teacher(torch.zeros(1, 54, device=self.device))
+            probe = teacher(torch.zeros(1, 49, device=self.device))
         if tuple(probe.shape) != (1, self.action_dim):
             raise ValueError(
-                f"Frozen walk teacher must map (N, 54) to (N, {self.action_dim}); "
-                f"got {tuple(probe.shape)}."
+                f"Frozen {label} teacher must map (N, 49) to "
+                f"(N, {self.action_dim}); got {tuple(probe.shape)}."
             )
+        for parameter in teacher.parameters():
+            parameter.requires_grad_(False)
+        return teacher
 
-        kick_teacher_path = os.path.expanduser(
-            os.environ.get(cfg.kick_teacher_env_var, cfg.kick_teacher_path)
-        )
-        if not os.path.isfile(kick_teacher_path):
-            raise FileNotFoundError(
-                f"Frozen kick teacher not found at {kick_teacher_path!r}. "
-                f"Set {cfg.kick_teacher_env_var} to the deploy-compatible 49-to-12 TorchScript policy."
-            )
-        self._kick_teacher = torch.jit.load(kick_teacher_path, map_location=self.device).eval()
-        with torch.inference_mode():
-            kick_probe = self._kick_teacher(torch.zeros(1, 49, device=self.device))
-        if tuple(kick_probe.shape) != (1, self.action_dim):
-            raise ValueError(
-                f"Frozen kick teacher must map (N, 49) to (N, {self.action_dim}); "
-                f"got {tuple(kick_probe.shape)}."
-            )
+    @property
+    def teacher_action(self) -> torch.Tensor:
+        """Raw 12-D composite teacher action used by distillation."""
+        return self._teacher_action
 
-        self._teacher_last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
-        self._teacher_target = torch.zeros_like(self._teacher_last_action)
-        self._kick_teacher_last_action = torch.zeros_like(self._teacher_last_action)
-        self._kick_teacher_target = torch.zeros_like(self._teacher_last_action)
-        self._kick_teacher_active = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        self._student_processed_actions = torch.zeros_like(self._teacher_last_action)
-        self._walk_teacher_reference_active = torch.ones(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        self._gait_phase = torch.zeros(self.num_envs, device=self.device)
-        self._adjust_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        if not cfg.execute_walk_teacher:
-            self._adjust_latched.fill_(True)
-        self._transition_elapsed = torch.zeros(self.num_envs, device=self.device)
-        self._transition_active = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        # Reward/termination terms use the same transition mask so kick-ready
-        # cannot start while control is still being blended.
-        self._env._adjust_transition_active = self._transition_active
-        self._handoff_distance = torch.zeros(self.num_envs, device=self.device)
-        self._sample_handoff_distance(slice(None))
+    @property
+    def adjust_teacher_action(self) -> torch.Tensor:
+        return self._adjust_teacher_action
 
-        # Walk, adjust, kick, and recovery all share the task's fixed
-        # -0.20 rad ankle-pitch nominal pose. There is no kick-only offset.
-        self._kick_default = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
-        self._kick_action_scale = torch.ones(self.action_dim, device=self.device)
-        if isinstance(self._joint_ids, slice):
-            policy_joint_names = self._asset.joint_names[self._joint_ids]
-        else:
-            policy_joint_names = [self._asset.joint_names[int(index)] for index in self._joint_ids]
-        for joint_index, joint_name in enumerate(policy_joint_names):
-            for pattern, value in K1_ACTION_SCALE.items():
-                if re.fullmatch(pattern, joint_name):
-                    self._kick_action_scale[joint_index] = value
-                    break
+    @property
+    def kick_teacher_action(self) -> torch.Tensor:
+        return self._kick_teacher_action
+
+    @property
+    def student_action(self) -> torch.Tensor:
+        return self._student_action
 
     @property
     def student_processed_actions(self) -> torch.Tensor:
-        """Student target before the frozen walk target replaces it."""
         return self._student_processed_actions
 
     @property
+    def teacher_processed_actions(self) -> torch.Tensor:
+        return self._teacher_processed_actions
+
+    @property
     def teacher_target(self) -> torch.Tensor:
-        return self._teacher_target
+        """Compatibility alias for older task reward code."""
+        return self._teacher_processed_actions
 
     @property
     def kick_teacher_target(self) -> torch.Tensor:
-        return self._kick_teacher_target
+        return self._offset + self._kick_teacher_action * self._scale
+
+    @property
+    def phase(self) -> torch.Tensor:
+        return self._phase
+
+    @property
+    def transition_alpha(self) -> torch.Tensor:
+        return self._transition_alpha
+
+    @property
+    def transition_active(self) -> torch.Tensor:
+        return self._phase == self.TRANSITION
+
+    @property
+    def adjust_teacher_active(self) -> torch.Tensor:
+        return self._phase != self.KICK
 
     @property
     def kick_teacher_active(self) -> torch.Tensor:
-        return self._kick_teacher_active
+        return self._phase != self.ADJUST
 
     @property
     def frozen_walk_active(self) -> torch.Tensor:
-        return (~self._adjust_latched) | self._transition_active
+        """Compatibility alias: pre-kick adjust teacher owns these environments."""
+        return self._phase != self.KICK
 
     @property
     def walk_teacher_reference_active(self) -> torch.Tensor:
-        return self._walk_teacher_reference_active
+        return self._phase == self.ADJUST
 
-    @property
-    def handoff_distance(self) -> torch.Tensor:
-        return self._handoff_distance
-
-    def _sample_handoff_distance(self, env_ids) -> None:
-        step = int(getattr(self._env, "common_step_counter", 0))
-        stage = 0
-        for threshold in self.cfg.handoff_stage_steps:
-            stage += int(step >= threshold)
-        low, high = self.cfg.handoff_distance_ranges[min(stage, 3)]
-        selected = self._handoff_distance[env_ids]
-        samples = torch.empty_like(selected).uniform_(low, high)
-        self._handoff_distance[env_ids] = samples
-
-    def _kick_teacher_blend(self) -> float:
-        step = int(getattr(self._env, "common_step_counter", 0))
-        stage = sum(step >= threshold for threshold in self.cfg.kick_teacher_blend_steps)
-        return self.cfg.kick_teacher_blend[min(stage, 3)]
-
-    def _process_kick_teacher(self) -> None:
-        kick_happened = getattr(
-            self._env,
-            "_kick_happened",
-            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+    def _policy_observation(self) -> torch.Tensor:
+        """Read the exact 49-D actor observation contract used by both teachers."""
+        observation = self._env.observation_manager.compute_group(
+            "policy", update_history=False
         )
-        self._kick_teacher_active.copy_(
-            self._adjust_latched
-            & ~self._transition_active
-            & _ready_latch(self._env)
-            & (
-                ~kick_happened
-                | (
-                    getattr(
-                        self._env,
-                        "_kick_recovery_time",
-                        torch.zeros(self.num_envs, device=self.device),
-                    )
-                    < self.cfg.kick_teacher_post_kick_duration_s
-                )
+        if not isinstance(observation, torch.Tensor) or observation.shape[1] != 49:
+            shape = getattr(observation, "shape", None)
+            raise RuntimeError(
+                "Adjust-kick teachers require a concatenated 49-D policy observation; "
+                f"got {shape}."
             )
-        )
-        if not self._kick_teacher_active.any():
-            return
+        return observation
 
-        perception = torch.zeros(self.num_envs, 3, device=self.device)
-        # The validated deploy checkpoint was trained with fixed valid vision
-        # metadata. Keep this exact actor-side contract for teacher roll-in.
-        perception[:, 0] = 1.0
-        perception[:, 2] = 1.0
-        kick_obs = torch.cat(
-            (
-                self._asset.data.projected_gravity_b,
-                self._asset.data.root_ang_vel_b,
-                ball_pos_b(self._env).clamp(-3.0, 3.0),
-                kick_target_pos_b(self._env).clamp(-2.0, 2.0) * 0.25,
-                perception,
-                self._asset.data.joint_pos[:, self._joint_ids] - self._kick_default,
-                0.1 * self._asset.data.joint_vel[:, self._joint_ids],
-                self._kick_teacher_last_action,
-            ),
-            dim=1,
-        )
+    def _teacher_actions(self) -> tuple[torch.Tensor, torch.Tensor]:
+        observation = self._policy_observation()
+        adjust_observation = observation.clone()
+        kick_observation = observation.clone()
+        # Each frozen expert sees its own previous action, as in standalone use.
+        adjust_observation[:, -self.action_dim :] = self._adjust_last_action
+        kick_observation[:, -self.action_dim :] = self._kick_last_action
         with torch.inference_mode():
-            kick_action = self._kick_teacher(kick_obs)
-        self._kick_teacher_last_action.copy_(kick_action)
-        self._kick_teacher_target.copy_(
-            self._kick_default + kick_action * self._kick_action_scale
-        )
+            adjust_action = self._adjust_teacher(adjust_observation)
+            kick_action = self._kick_teacher(kick_observation)
+        self._adjust_teacher_action.copy_(adjust_action)
+        self._kick_teacher_action.copy_(kick_action)
+        # Do not pre-run the kick expert during a potentially long alignment.
+        # Its first transition action therefore starts with the same zero
+        # previous-action state as the standalone kick episode. Likewise, stop
+        # advancing adjust memory after the bridge is complete.
+        adjust_active = self._phase != self.KICK
+        kick_active = self._phase != self.ADJUST
+        self._adjust_last_action[adjust_active] = adjust_action[adjust_active]
+        self._kick_last_action[kick_active] = kick_action[kick_active]
+        return adjust_action, kick_action
 
-        blend = self._kick_teacher_blend()
-        if blend > 0.0:
-            active = self._kick_teacher_active
-            self._processed_actions[active] = torch.lerp(
-                self._student_processed_actions[active],
-                self._kick_teacher_target[active],
-                blend,
+    def _advance_phase(self) -> None:
+        adjust_mask = self._phase == self.ADJUST
+        if adjust_mask.any():
+            ready = _ready_latch(
+                self._env,
+                standoff=self.cfg.target_ball_distance,
+                position_tolerance=self.cfg.ready_position_tolerance,
+                heading_tolerance_deg=self.cfg.ready_heading_tolerance_deg,
+                ball_speed_tolerance=self.cfg.ready_ball_speed_tolerance,
+                min_robot_ball_distance=self.cfg.minimum_ball_distance,
+                max_robot_ball_distance=self.cfg.maximum_ball_distance,
+                max_ball_displacement=self.cfg.maximum_ball_displacement,
             )
+            start_transition = adjust_mask & ready
+            self._phase[start_transition] = self.TRANSITION
+            self._transition_elapsed[start_transition] = 0.0
 
-    def _print_ready_debug(self) -> None:
-        """Print Play-only ready-gate diagnostics at a low frequency."""
-        if not self.cfg.debug_ready_latch:
+        transition = self._phase == self.TRANSITION
+        if transition.any():
+            if self.cfg.transition_duration_s <= 0.0:
+                self._phase[transition] = self.KICK
+                self._transition_alpha[transition] = 1.0
+            else:
+                normalized = (
+                    self._transition_elapsed[transition] / self.cfg.transition_duration_s
+                ).clamp(0.0, 1.0)
+                self._transition_alpha[transition] = normalized.square() * (
+                    3.0 - 2.0 * normalized
+                )
+                self._transition_elapsed[transition] += self._env.step_dt
+                finished = transition & (
+                    self._transition_elapsed >= self.cfg.transition_duration_s
+                )
+                self._phase[finished] = self.KICK
+                self._transition_alpha[finished] = 1.0
+
+        self._env._adjust_transition_active = self._phase == self.TRANSITION
+
+    def _teacher_control_blend(self) -> float:
+        """Curriculum from teacher roll-in to independently executed student."""
+        step = int(getattr(self._env, "common_step_counter", 0))
+        stage = sum(step >= threshold for threshold in self.cfg.rollin_stage_steps)
+        return self.cfg.teacher_control_blend[
+            min(stage, len(self.cfg.teacher_control_blend) - 1)
+        ]
+
+    def _print_debug(self) -> None:
+        if not self.cfg.debug_transition:
             return
         step = int(getattr(self._env, "common_step_counter", 0))
-        if step % self.cfg.debug_ready_interval_steps != 0:
+        if step % self.cfg.debug_interval_steps != 0:
             return
-
-        _, pose_error, heading_error = _adjust_geometry(self._env)
-        ball = self._env.scene["ball"]
-        ball_speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
-        ball_start = getattr(self._env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
-        ball_displacement = torch.norm(ball.data.root_pos_w[:, :2] - ball_start, dim=1)
-        robot_ball_distance = torch.norm(
-            self._asset.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2], dim=1
+        _, position_error, heading_error = _adjust_geometry(
+            self._env, standoff=self.cfg.target_ball_distance
         )
-        ready = _ready_latch(self._env)
-        kick_happened = getattr(
-            self._env,
-            "_kick_happened",
-            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
-        )
-        checks = {
-            "pose": pose_error <= 0.22,
-            "heading": heading_error.abs() <= math.radians(25.0),
-            "speed": ball_speed <= 0.15,
-            "distance": (robot_ball_distance >= 0.10) & (robot_ball_distance <= 0.35),
-            "displacement": ball_displacement <= 0.10,
-        }
-        passed = " ".join(
-            f"{name}={int(mask.sum().item())}/{self.num_envs}" for name, mask in checks.items()
-        )
+        counts = [int((self._phase == value).sum().item()) for value in range(3)]
+        imitation_rmse = torch.mean(
+            (self._student_action - self._teacher_action).square()
+        ).sqrt()
         print(
-            f"[ADJUST_KICK_READY] step={step} ready={int(ready.sum().item())}/{self.num_envs} "
-            f"teacher={int(self._kick_teacher_active.sum().item())}/{self.num_envs} "
-            f"kicked={int(kick_happened.sum().item())}/{self.num_envs} | {passed} | "
-            f"mean pose={pose_error.mean().item():.3f}m "
-            f"heading={torch.rad2deg(heading_error.abs()).mean().item():.1f}deg "
-            f"ball_speed={ball_speed.mean().item():.3f}m/s "
-            f"robot_ball={robot_ball_distance.mean().item():.3f}m "
-            f"displacement={ball_displacement.mean().item():.3f}m",
+            "[ADJUST_KICK_TRANSITION] "
+            f"step={step} adjust={counts[0]} blend={counts[1]} kick={counts[2]} "
+            f"position_error={position_error.mean().item():.3f}m "
+            f"heading_error={torch.rad2deg(heading_error.abs()).mean().item():.1f}deg "
+            f"student_teacher_rmse={imitation_rmse.item():.4f}",
             flush=True,
         )
 
-    def process_actions(self, actions: torch.Tensor):
+    def process_actions(self, actions: torch.Tensor) -> None:
         super().process_actions(actions)
+        self._student_action.copy_(actions)
         self._student_processed_actions.copy_(self._processed_actions)
 
-        error_b, pre_kick_pose_distance, heading_error = _adjust_geometry(self._env)
-        # Keep the validated walk teacher in control through the contact-free
-        # orbit/side-step alignment. This supports 360-degree targets: the
-        # teacher rotates and translates around the ball, then hands off only
-        # after the precise ready gate.
-        if self.cfg.execute_walk_teacher:
-            # The ball is already in the kick-distance band. Let the frozen
-            # walk teacher perform the contact-free orbit/side-step alignment
-            # until the precise behind-ball ready gate is reached. This avoids
-            # handing control to the student merely because the ball is close.
-            enter_adjust = _ready_latch(self._env) & ~self._adjust_latched
-        else:
-            # Adjust-only task: the student owns control from the first step.
-            enter_adjust = torch.ones(
-                self.num_envs, dtype=torch.bool, device=self.device
-            )
-        newly_handed_off = enter_adjust & ~self._adjust_latched
-        self._adjust_latched |= enter_adjust
-        self._transition_elapsed[newly_handed_off] = 0.0
-        if self.cfg.execute_walk_teacher and self.cfg.transition_duration_s > 0.0:
-            self._transition_active.copy_(
-                self._adjust_latched
-                & (self._transition_elapsed < self.cfg.transition_duration_s)
-            )
-        else:
-            self._transition_active.zero_()
-        kick_happened = getattr(
-            self._env,
-            "_kick_happened",
-            torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
-        )
-        walk_active = (~self._adjust_latched) & (~kick_happened)
-        self._walk_teacher_reference_active.copy_(
-            (~_ready_latch(self._env)) & (~kick_happened)
-        )
-        walk_needed = (
-            walk_active
-            | self._transition_active
-            | self._walk_teacher_reference_active
-        )
-        if walk_needed.any():
-            command = torch.zeros(self.num_envs, 3, device=self.device)
-            command[:, 0] = (self.cfg.command_gain_x * error_b[:, 0]).clamp(-1.5, 1.5)
-            command[:, 1] = (self.cfg.command_gain_y * error_b[:, 1]).clamp(-1.2, 1.2)
-            command_heading = approach_heading_error(self._env)
-            command[:, 2] = (self.cfg.command_gain_yaw * command_heading).clamp(-1.6, 1.6)
-            command[:, :2] *= facing_translation_scale(
-                command_heading,
-                full_speed_deg=self.cfg.walk_full_speed_heading_deg,
-                stop_deg=self.cfg.walk_stop_translation_heading_deg,
-            ).unsqueeze(1)
-            close = pre_kick_pose_distance < self.cfg.slowdown_distance
-            command[close, :2] *= (
-                pre_kick_pose_distance[close] / self.cfg.slowdown_distance
-            ).unsqueeze(1)
+        self._advance_phase()
+        adjust_action, kick_action = self._teacher_actions()
+        alpha = self._transition_alpha.unsqueeze(1)
+        composite = torch.lerp(adjust_action, kick_action, alpha)
+        composite[self._phase == self.ADJUST] = adjust_action[self._phase == self.ADJUST]
+        composite[self._phase == self.KICK] = kick_action[self._phase == self.KICK]
+        self._teacher_action.copy_(composite)
+        self._teacher_processed_actions.copy_(self._offset + composite * self._scale)
 
-            self._gait_phase = torch.fmod(
-                self._gait_phase + walk_needed.float() * self._env.step_dt * self.cfg.gait_frequency,
-                1.0,
-            )
-            phase = torch.stack(
-                (
-                    torch.cos(2.0 * math.pi * self._gait_phase),
-                    torch.sin(2.0 * math.pi * self._gait_phase),
-                ),
-                dim=1,
-            )
-            internal = torch.zeros(self.num_envs, 7, device=self.device)
-            internal[:, 0] = self.cfg.gait_frequency
-            q_rel = (
-                self._asset.data.joint_pos[:, self._joint_ids]
-                - self._asset.data.default_joint_pos[:, self._joint_ids]
-            )
-            obs = torch.cat(
-                (
-                    command,
-                    internal,
-                    phase,
-                    self._asset.data.projected_gravity_b,
-                    self._asset.data.root_ang_vel_b,
-                    q_rel,
-                    self._asset.data.joint_vel[:, self._joint_ids],
-                    self._teacher_last_action,
-                ),
-                dim=1,
-            )
-            with torch.inference_mode():
-                teacher_action = self._teacher(obs)
-            self._teacher_last_action.copy_(teacher_action)
-
-            walk_default = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
-            self._teacher_target.copy_(walk_default + teacher_action)
-            self._processed_actions[walk_active] = self._teacher_target[walk_active]
-
-            if self._transition_active.any():
-                active = self._transition_active
-                phase = (
-                    self._transition_elapsed[active] / self.cfg.transition_duration_s
-                ).clamp(0.0, 1.0)
-                alpha = phase.square() * (3.0 - 2.0 * phase)
-                self._processed_actions[active] = torch.lerp(
-                    self._teacher_target[active],
-                    self._student_processed_actions[active],
-                    alpha.unsqueeze(1),
+        blend = self._teacher_control_blend()
+        if blend > 0.0:
+            self._processed_actions.copy_(
+                torch.lerp(
+                    self._student_processed_actions,
+                    self._teacher_processed_actions,
+                    blend,
                 )
-                self._transition_elapsed[active] += self._env.step_dt
-
-        self._process_kick_teacher()
-        self._print_ready_debug()
+            )
+        self._print_debug()
 
     def reset(self, env_ids=None) -> None:
         super().reset(env_ids)
-        self._teacher_last_action[env_ids] = 0.0
-        self._teacher_target[env_ids] = 0.0
-        self._kick_teacher_last_action[env_ids] = 0.0
-        self._kick_teacher_target[env_ids] = 0.0
-        self._kick_teacher_active[env_ids] = False
+        self._adjust_last_action[env_ids] = 0.0
+        self._kick_last_action[env_ids] = 0.0
+        self._teacher_action[env_ids] = 0.0
+        self._adjust_teacher_action[env_ids] = 0.0
+        self._kick_teacher_action[env_ids] = 0.0
+        self._student_action[env_ids] = 0.0
         self._student_processed_actions[env_ids] = 0.0
-        self._walk_teacher_reference_active[env_ids] = True
-        self._gait_phase[env_ids] = 0.0
-        self._adjust_latched[env_ids] = not self.cfg.execute_walk_teacher
+        self._teacher_processed_actions[env_ids] = 0.0
+        self._phase[env_ids] = self.ADJUST
         self._transition_elapsed[env_ids] = 0.0
-        self._transition_active[env_ids] = False
-        self._sample_handoff_distance(env_ids)
+        self._transition_alpha[env_ids] = 0.0
 
 
 @configclass
-class FrozenWalkAdjustActionCfg(JointPositionActionCfg):
-    class_type: type = FrozenWalkAdjustAction
-    teacher_path: str = MISSING
-    teacher_env_var: str = "ADJUST_KICK_WALK_TEACHER_JIT"
+class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
+    class_type: type = FrozenAdjustKickTransitionAction
+    adjust_teacher_path: str = MISSING
+    adjust_teacher_env_var: str = "ADJUST_KICK_ADJUST_TEACHER_JIT"
     kick_teacher_path: str = MISSING
     kick_teacher_env_var: str = "ADJUST_KICK_KICK_TEACHER_JIT"
-    kick_teacher_blend_steps: tuple[int, int, int] = (40_000, 80_000, 140_000)
-    kick_teacher_blend: tuple[float, float, float, float] = (1.0, 0.67, 0.33, 0.0)
-    kick_teacher_post_kick_duration_s: float = 0.8
-    handoff_stage_steps: tuple[int, int, int] = (100_000, 250_000, 500_000)
-    handoff_distance_ranges: tuple[tuple[float, float], ...] = (
-        (0.55, 0.65),
-        (0.50, 0.70),
-        (0.45, 0.75),
-        (0.45, 0.80),
-    )
-    slowdown_distance: float = 0.90
-    handoff_heading_tolerance_deg: float = 20.0
-    transition_duration_s: float = 0.50
-    execute_walk_teacher: bool = True
-    walk_full_speed_heading_deg: float = 15.0
-    walk_stop_translation_heading_deg: float = 45.0
-    command_gain_x: float = 1.4
-    command_gain_y: float = 1.8
-    command_gain_yaw: float = 2.5
-    gait_frequency: float = 2.0
-    debug_ready_latch: bool = False
-    debug_ready_interval_steps: int = 50
+
+    target_ball_distance: float = 0.30
+    minimum_ball_distance: float = 0.20
+    maximum_ball_distance: float = 0.40
+    ready_position_tolerance: float = 0.08
+    # Enter kick transition once the robot is within the requested +/-30 deg
+    # target-heading window.
+    ready_heading_tolerance_deg: float = 30.0
+    ready_ball_speed_tolerance: float = 0.08
+    maximum_ball_displacement: float = 0.04
+    # A short bridge preserves the validated adjust/kick contact timing while
+    # avoiding a discontinuous joint target at handoff.
+    transition_duration_s: float = 0.20
+
+    rollin_stage_steps: tuple[int, int, int] = (120_000, 300_000, 600_000)
+    teacher_control_blend: tuple[float, float, float, float] = (1.0, 0.99, 0.90, 0.0)
+
+    debug_transition: bool = False
+    debug_interval_steps: int = 50
+
+
+# Backward-compatible names for configs created from the earlier draft.
+FrozenWalkAdjustAction = FrozenAdjustKickTransitionAction
+FrozenWalkAdjustActionCfg = FrozenAdjustKickTransitionActionCfg

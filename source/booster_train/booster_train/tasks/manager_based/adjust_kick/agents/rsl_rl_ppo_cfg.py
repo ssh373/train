@@ -11,7 +11,9 @@ class AdjustKickPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 200
     experiment_name = "k1_adjust_kick_001"
     empirical_normalization = True
-    clip_actions = 1.0
+    # Both source runs used unclipped actions. Keep the same contract so the
+    # distilled actor can reproduce their full normalized 12-D output.
+    clip_actions = None
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.5,

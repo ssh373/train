@@ -1,160 +1,123 @@
-# K1 autonomous adjust kick
+# K1 unified adjust -> kick policy
 
-`Booster-K1-Adjust-Kick_001-v0` trains an adjust-first policy: the ball already
-starts nearby and in front, then the policy moves around it without contact,
-aligns to a 360-degree target, kicks, and recovers. Long-range approach is not
-part of this task. There is no walk/kick/phase observation.
+`Booster-K1-Adjust-Kick_001-v0` combines the supplied, already-trained K1
+adjust and kick policies into one 49-observation, 12-action student actor. The
+old policies are loaded as frozen TorchScript teachers and are never optimized.
 
-The frozen walk teacher is used as the actual controller for the short,
-contact-free orbit/side-step alignment around the nearby ball. It hands off
-only after the precise behind-ball ready gate. The deploy-identical frozen
-kick teacher then preserves the original kick, with a short post-kick teacher
-window for stable recovery.
+The actor input is unchanged from the two source tasks:
 
-## Independence
+1. projected gravity (3)
+2. base angular velocity (3)
+3. camera-like robot-frame ball XY (2)
+4. requested ball launch direction XY, unit length (2)
+5. ball visible / age / confidence (3)
+6. leg joint positions (12), velocities (12), previous action (12)
 
-This task has private copies of its base environment, kick MDP terms, symmetry,
-and PPO configuration. It does not import code from `manager_based/kick`, so
-future edits to the old kick task cannot alter this task. The frozen walk and
-kick model files are treated as read-only policy assets.
+The launch direction is therefore the kick-direction input; no target distance
+is encoded in the actor observation.
 
-The shared walk/adjust nominal ankle-pitch pose is `-0.20 rad`, with no hidden
-`0.05 rad` conversion between the frozen walk and learned branch. Final target
-success and target visualization use a `0.15 m` radius. Success also requires
-the travelled ball direction to stay within about `5.7 deg` of the initial
-ball-to-target vector (`cos > 0.995`). A valid kick must launch the ball above
-`0.5 m/s`, but there is no practical speed cap when it reaches the target.
+## Behavior and preservation
 
-Walk, adjust, kick-teacher conversion, and recovery all use the fixed
-`-0.20 rad` ankle-pitch nominal pose. There is no kick-only ankle offset.
-The trunk-height target is `0.52 m` during adjustment and through ball contact,
-about 3 cm below the upright target. After a valid kick it returns to `0.55 m`
-for walk-ready recovery; the fall termination remains at `0.45 m`.
+The controller has three internal training phases:
 
-## Curriculum
+1. **Adjust:** execute and imitate `adjust_teacher.pt` while orbiting the ball.
+2. **Handoff:** after the behind-ball ready gate, blend to the kick teacher for
+   `0.20 s` with the smoothstep bridge.
+3. **Kick:** execute and imitate `kick_teacher.pt` through kick and recovery.
 
-The reset curriculum uses `common_step_counter` and changes only the reset
-distribution. No curriculum-stage value is exposed to the actor.
+Both teachers keep independent previous-action histories. Outside the 0.20 s
+bridge, the composite target is exactly one of the two frozen policies. The
+student's imitation loss is measured in their original normalized action
+space. The handoff is short because the objective is minimum time from an
+arbitrary approach state to a valid kick while avoiding a hard joint-target
+jump.
 
-| Stage | Control steps | Ball distance | Ball bearing | Ball-to-target distance | Target bearing |
-|---|---:|---:|---:|---:|---:|
-| 0 | 0--99,999 | 0.28--0.35 m | -8--8 deg | 3.5--4.5 m | -30--30 deg |
-| 1 | 100,000--249,999 | 0.28--0.35 m | -12--12 deg | 3.5--5.5 m | -90--90 deg |
-| 2 | 250,000--499,999 | 0.28--0.35 m | -15--15 deg | 3.5--6.0 m | full 360 deg |
-| 3 | 500,000+ | 0.28--0.35 m | -15--15 deg | 3.0--7.0 m | full 360 deg |
+The attached source configs used different URDF filenames (`K1_jy_locomotion`
+for adjust and `K1_locomotion` for kick). Their joint order, 12-D action scale,
+default leg pose, and 49-D actor contract match. The unified task intentionally
+uses the kick run's `K1_locomotion.urdf` and ball material because foot-ball
+contact is the less forgiving part; preservation must therefore be accepted by
+the measured 99% metric and Play evaluation rather than assumed from filenames.
 
-The ball remains in the robot's forward sector and inside the kick-distance
-band in every stage. There is no long-range forward-approach curriculum. The
-target bearing widens to the full 360 degrees, forcing fast contact-free
-movement around the ball. The walk teacher controls this short alignment and
-hands off over `0.25 s` after the ready gate.
+The nominal robot-to-ball distance is `0.30 m`. Before kick, distances outside
+`0.20--0.40 m` receive an explicit penalty. The kick gate requires the desired
+behind-ball pose within `0.08 m`, heading within `30 deg`, a nearly stationary
+ball, and no more than `0.04 m` ball displacement.
 
-Kick-teacher roll-in has a separate, shorter curriculum:
+The kick target bearing stays inside the validated `-30--30 deg` envelope. The
+ball remains in the kickable `0.22--0.38 m` band, while its initial bearing
+expands from `+/-15 deg` to the full `+/-180 deg`. This teaches fast orbit and
+heading alignment around a nearby ball. A separate long-range walk teacher is
+required if the ball should instead start 0.5--1.2 m away.
 
-| Control steps | Approx. PPO iteration | Teacher blend |
-|---:|---:|---:|
-| 0--199,999 | 0--8,333 | 1.00 |
-| 200,000--399,999 | 8,334--16,666 | 0.90 |
-| 400,000--649,999 | 16,667--27,083 | 0.70 |
-| 650,000+ | 27,084+ | 0.00 |
+## Included teacher files
 
-The blend is active only after the geometric ready gate and remains active for
-`0.8 s` after a valid kick so the teacher can guide leg recovery. The kick
-imitation reward uses `std=0.25`, allowing small environment-specific changes
-such as a deeper knee bend while retaining the validated shape.
+- `models/adjust_teacher.pt`: SHA256
+  `5AA3E51EDD8403A586A9189A25ED238F51D31BE52583582A91CE6019AE9B3391`
+- `models/kick_teacher.pt`: SHA256
+  `A8D1A44690F937E79788D6273BA79BA1354EC45FAD40B0BFB13A751B034ACEAC`
 
-## Reward intent
-
-- Fast adjustment around the ball: position progress `+8`; the separate
-  forward-approach velocity reward is disabled.
-- Fast alignment: heading progress `+5`, precise behind-ball pose `+4`.
-- Do not touch during adjustment: early ball motion `-80`, early foot proximity `-20`.
-- Accurate kick: target accuracy `+20` (`std=0.25 m`, matching `kick_001`),
-  immediate direction accuracy `+15`, target velocity `+10`, direction-gated
-  kick speed `+10` up to `3.0 m/s`, valid foot-contact event `+8`, lateral
-  velocity `-8`.
-- Recovery: stable recovery `+4`, walk-ready pose `+2`, both feet grounded `+8`.
-- Existing kick preservation: deploy kick teacher tracking `+4` (`std=0.25`).
-- Smoothness and safety terms from the K1 kick task remain active, including
-  action-rate penalties. The ball-overspeed penalty is disabled in this task;
-  direction and target accuracy are prioritized.
-
-Target distance is sampled from the ball, so the far-ball curriculum cannot
-accidentally place the target on top of the ball.
-
-The geometric ready gate is behind-ball position error <= 0.22 m, horizontal
-robot-base-to-ball distance 0.10--0.35 m, heading error <= 25 deg, ball speed
-<= 0.15 m/s, and ball displacement from reset <= 0.10 m. Kick rewards and the
-valid-kick latch are zero before this gate is reached. Ball displacement beyond
-0.03 m remains penalized during adjustment, even after the ball stops.
-
-## Walk reference
-
-The 54-observation velocity-walk TorchScript teacher directly controls the
-short alignment phase and provides the target used for the smooth handoff:
-
-`adjust_kick/models/walk_teacher.pt`
-
-To override it with another compatible teacher, set:
+Optional overrides:
 
 ```bash
-export ADJUST_KICK_WALK_TEACHER_JIT=/absolute/path/to/walk_teacher.pt
+export ADJUST_KICK_ADJUST_TEACHER_JIT=/absolute/path/to/adjust.pt
+export ADJUST_KICK_KICK_TEACHER_JIT=/absolute/path/to/kick.pt
 ```
 
-The teacher is frozen. Missing or incompatible teacher files stop environment
-startup instead of silently training a different walking style.
+Both must map `(N, 49)` to `(N, 12)`; task startup fails on a mismatch.
 
-The 49-observation kick teacher is loaded from:
+## Recommended training sequence
 
-`adjust_kick/models/kick_teacher.pt`
+Run the dedicated DAgger-style transition distillation first. It keeps frozen
+teacher control enabled, learns one student on the visited states, reports the
+fraction of non-transition samples within the requested preservation tolerance,
+and exports a single TorchScript actor. The student actor and empirical
+normalizer are warm-started exactly from `adjust_teacher.pt`; kick/transition
+behavior is then added without beginning from a random network.
 
-It can be overridden with `ADJUST_KICK_KICK_TEACHER_JIT`. Put both models at
-the task-local relative paths above before starting training; environment
-variables are optional overrides.
+```bash
+cd train
+python -m booster_train.tasks.manager_based.adjust_kick.train_transition \
+  --task Booster-K1-Adjust-Kick_001-v0 \
+  --num_envs 4096 \
+  --iterations 20000 \
+  --target_preservation 0.99 \
+  --headless
+```
 
-Deployment sequence:
+Outputs are written under:
 
-1. The BT uses the existing walk policy until the ball is nearby and in front.
-2. At approximately `0.30--0.75 m`, the BT stops walk and starts the
-   adjust-kick actor.
-3. Initialize the actor's previous-action observation from the final walk joint
-   target in adjust action coordinates: `(q_target - q_default) / action_scale`.
-4. Keep the adjust-kick actor active through kick and recovery.
-5. After kick detection and at least 0.8 s of stable recovery, the BT may return
-   to the existing walk policy.
+```text
+logs/rsl_rl/k1_adjust_kick_001/distilled/
+  model_distilled.pt
+  model_distilled_best.pt
+  exported/k1_adjust_kick_distilled.pt
+```
 
-For repeated kicks, the BT repeats this same sequence. Walking between balls
-always remains the unchanged existing walk policy.
+`target_preservation=0.99` is an acceptance metric, not a claim made before
+training: by default a sample counts as preserved only when every one of its 12
+normalized actions is within `0.05` of the active frozen teacher.
 
-## Train and play
+Then optionally PPO fine-tune task success while rolling teacher control from
+100% -> 99% -> 90% -> 0%. Put the distilled checkpoint in a run directory if
+needed by your RSL-RL checkpoint resolver, then resume with optimizer reset:
 
 ```bash
 python scripts/rsl_rl/train.py \
   --task Booster-K1-Adjust-Kick_001-v0 \
-  --headless
+  --resume --load_run distilled --checkpoint model_distilled.pt \
+  --reset_optimizer --headless
+```
 
+Evaluate/export with no teacher control:
+
+```bash
 python scripts/rsl_rl/play.py \
   --task Booster-K1-Adjust-Kick_001-Play-v0 \
   --checkpoint /absolute/path/to/model.pt \
-  --num_envs 1
+  --num_envs 1 --headless
 ```
 
-Because the actor and critic observation dimensions match `k1_kick_001`, an
-existing kick checkpoint can be used as a warm start. Place or link it under
-`logs/rsl_rl/k1_adjust_kick_001/<run>/`, then use `--resume --load_run ...
---checkpoint ... --reset_optimizer`. Resetting the optimizer is recommended
-because the horizon and reward structure are substantially different.
-
-```bash
-mkdir -p logs/rsl_rl/k1_adjust_kick_001/kick_warmstart
-cp logs/rsl_rl/k1_kick_001/<old-run>/model_9999.pt \
-  logs/rsl_rl/k1_adjust_kick_001/kick_warmstart/
-
-python scripts/rsl_rl/train.py \
-  --task Booster-K1-Adjust-Kick_001-v0 \
-  --resume \
-  --load_run kick_warmstart \
-  --checkpoint model_9999.pt \
-  --reset_optimizer \
-  --headless
-```
+The Play task forces teacher roll-in to zero, so a successful result is the
+single student policy rather than hidden switching between the two source
+files.

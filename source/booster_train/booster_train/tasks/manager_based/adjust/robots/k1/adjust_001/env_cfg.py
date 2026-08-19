@@ -48,13 +48,15 @@ class ObservationsCfg:
                 "distance_noise_ratio": 0.02,
                 "dropout_rate_per_s": 0.50,
                 "dropout_duration_range": (0.08, 0.30),
+                "camera_bias_range": (-0.015, 0.015),
+                "camera_latency_s": 0.06,
             },
             clip=(-3.0, 3.0),
         )
         target_direction = ObsTerm(func=mdp.target_direction_b, clip=(-1.0, 1.0))
-        ball_visible = ObsTerm(func=mdp.ball_visible)
-        ball_time_since_seen = ObsTerm(func=mdp.ball_time_since_seen)
-        ball_confidence = ObsTerm(func=mdp.ball_confidence)
+        ball_visible = ObsTerm(func=mdp.adjust_ball_visible)
+        ball_time_since_seen = ObsTerm(func=mdp.adjust_ball_time_since_seen)
+        ball_confidence = ObsTerm(func=mdp.adjust_ball_confidence)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1, noise=Unoise(n_min=-0.5, n_max=0.5))
         actions = ObsTerm(func=mdp.last_action)
@@ -335,7 +337,22 @@ class EventsCfg(KickEventsCfg):
     # the alignment point is derived from the same sampled kick direction.
     reset_ball = None
     reset_target = None
-    push_robot = None
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(2.0, 4.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "velocity_range": {
+                "x": (-0.12, 0.12),
+                "y": (-0.12, 0.12),
+                "z": (0.0, 0.0),
+                "roll": (-0.06, 0.06),
+                "pitch": (-0.06, 0.06),
+                "yaw": (-0.10, 0.10),
+            },
+        },
+    )
     reset_scenario = EventTerm(
         func=mdp.reset_adjust_scenario,
         mode="reset",
@@ -394,6 +411,7 @@ class K1AdjustPlayEnvCfg(K1AdjustEnvCfg):
         self.events.body_mass = None
         self.events.body_com = None
         self.events.pd_gains = None
+        self.events.push_robot = None
         # Validate the same initial distribution as the first training stage.
         self.events.reset_scenario.params["curriculum_stage"] = 0
         self.events.reset_scenario.params["visualize_target"] = True

@@ -41,6 +41,12 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--curriculum_stage",
+    type=int,
+    default=None,
+    help="Override an environment reset curriculum stage when the task exposes reset_scenario.",
+)
+parser.add_argument(
     "--reset_optimizer", action="store_true", default=False,
     help="Load checkpoint weights without optimizer state so the selected task's learning rate is used.",
 )
@@ -203,6 +209,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.curriculum_stage is not None:
+        events_cfg = getattr(env_cfg, "events", None)
+        reset_scenario_cfg = getattr(events_cfg, "reset_scenario", None)
+        if reset_scenario_cfg is None or not hasattr(reset_scenario_cfg, "params"):
+            raise ValueError(
+                "--curriculum_stage was provided, but this environment does not expose "
+                "events.reset_scenario.params."
+            )
+        reset_scenario_cfg.params["curriculum_stage"] = args_cli.curriculum_stage
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here

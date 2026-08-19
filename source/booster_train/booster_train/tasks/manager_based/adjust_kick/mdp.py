@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 from isaaclab.assets import Articulation, RigidObject
@@ -38,13 +37,15 @@ def reset_adjust_kick_scenario(
     """Reset ball and target using a four-stage 360-degree curriculum."""
     stage = _curriculum_stage(env, stage_steps)
     distributions = (
-        # The ball always starts inside the kick-distance band. Curriculum
-        # difficulty comes from circling around it to wider target bearings,
-        # not from learning a separate forward approach behavior.
-        ((0.28, 0.35), (-8.0, 8.0), (3.5, 4.5), (-30.0, 30.0)),
-        ((0.28, 0.35), (-12.0, 12.0), (3.5, 5.5), (-90.0, 90.0)),
-        ((0.28, 0.35), (-15.0, 15.0), (3.5, 6.0), (-180.0, 180.0)),
-        ((0.28, 0.35), (-15.0, 15.0), (3.0, 7.0), (-180.0, 180.0)),
+        # The ball always starts inside the kickable distance band. Difficulty
+        # comes from progressively wider initial bearings, i.e. fast orbit and
+        # heading alignment around the nearby ball. Long-range walking is not
+        # silently assumed here because the supplied adjust teacher was not
+        # trained as a 1.2 m approach controller.
+        ((0.22, 0.38), (-15.0, 15.0), (3.5, 4.5), (-30.0, 30.0)),
+        ((0.22, 0.38), (-60.0, 60.0), (3.5, 5.5), (-30.0, 30.0)),
+        ((0.22, 0.38), (-120.0, 120.0), (3.5, 6.0), (-30.0, 30.0)),
+        ((0.22, 0.38), (-180.0, 180.0), (3.0, 7.0), (-30.0, 30.0)),
     )
     ball_distance, ball_bearing, target_distance, target_angle = distributions[stage]
     kick_mdp.reset_ball_in_front(
@@ -124,6 +125,7 @@ def facing_translation_scale(
 
 def _ready_latch(
     env: ManagerBasedEnv,
+    standoff: float = 0.30,
     position_tolerance: float = 0.22,
     heading_tolerance_deg: float = 25.0,
     ball_speed_tolerance: float = 0.15,
@@ -133,7 +135,7 @@ def _ready_latch(
 ) -> torch.Tensor:
     if not hasattr(env, "_adjust_ready_latched"):
         env._adjust_ready_latched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-    _, distance, heading_error = _adjust_geometry(env)
+    _, distance, heading_error = _adjust_geometry(env, standoff=standoff)
     ball: RigidObject = env.scene["ball"]
     ball_speed = torch.norm(ball.data.root_lin_vel_w[:, :2], dim=1)
     robot: Articulation = env.scene["robot"]
@@ -517,115 +519,58 @@ def adjusted_ball_not_kicked(
     )
 
 
-def walk_teacher_tracking(
+def composite_teacher_tracking(
     env: ManagerBasedRLEnv,
-    teacher_env_var: str = "ADJUST_KICK_WALK_TEACHER_JIT",
-    std: float = 0.20,
+    std: float = 0.10,
+    transition_multiplier: float = 3.0,
 ) -> torch.Tensor:
-    """Imitate the validated walk teacher during contact-free alignment."""
+    """Preserve both experts and emphasize the only newly learned boundary.
+
+    The comparison is in the teachers' original normalized 12-D action space,
+    so joints with different physical action scales contribute consistently.
+    """
     action_term = env.action_manager.get_term("joint_pos")
-    if hasattr(action_term, "student_processed_actions"):
-        error = torch.mean(
-            (action_term.student_processed_actions - action_term.teacher_target).square(), dim=1
-        )
-        active = getattr(
-            action_term,
-            "walk_teacher_reference_active",
-            action_term.frozen_walk_active,
-        )
-        return torch.exp(-error / (std * std)) * active.float()
-
-    bundled_teacher = os.path.abspath(
-        os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "locomotion_kick",
-            "robots",
-            "k1",
-            "velocity_kick",
-            "models",
-            "velocity_teacher.pt",
-        )
-    )
-    path = os.path.expanduser(os.environ.get(teacher_env_var, bundled_teacher))
-    if not os.path.isfile(path):
-        if not hasattr(env, "_adjust_teacher_warning_printed"):
-            print(
-                f"[adjust-kick] walk teacher not found at {path!r}; preservation reward is disabled.",
-                flush=True,
-            )
-            env._adjust_teacher_warning_printed = True
-        return torch.zeros(env.num_envs, device=env.device)
-
-    robot: Articulation = env.scene["robot"]
-    step = env.episode_length_buf.clone()
-    if not hasattr(env, "_adjust_walk_teacher"):
-        env._adjust_walk_teacher = torch.jit.load(path, map_location=env.device).eval()
-        probe = env._adjust_walk_teacher(torch.zeros(1, 54, device=env.device))
-        if tuple(probe.shape) != (1, 12):
-            raise ValueError(f"{teacher_env_var} must accept 54 observations and return 12 actions.")
-        env._adjust_teacher_last_action = torch.zeros(env.num_envs, 12, device=env.device)
-        env._adjust_teacher_step = torch.full_like(step, -1)
-        env._adjust_gait_phase = torch.zeros(env.num_envs, device=env.device)
-        env._adjust_teacher_target = torch.zeros(env.num_envs, 12, device=env.device)
-
-    if not torch.equal(step, env._adjust_teacher_step):
-        error_b, distance, heading_error = _adjust_geometry(env)
-        command = torch.zeros(env.num_envs, 3, device=env.device)
-        command[:, 0] = (1.4 * error_b[:, 0]).clamp(-1.5, 1.5)
-        command[:, 1] = (1.8 * error_b[:, 1]).clamp(-1.2, 1.2)
-        command_heading = approach_heading_error(env)
-        command[:, 2] = (2.5 * command_heading).clamp(-1.6, 1.6)
-        command[:, :2] *= facing_translation_scale(command_heading).unsqueeze(1)
-        close = distance < 0.45
-        command[close, :2] *= (distance[close] / 0.45).unsqueeze(1)
-        active = ~_ready_latch(env)
-        env._adjust_gait_phase = torch.fmod(
-            env._adjust_gait_phase + active.float() * env.step_dt * 2.0, 1.0
-        )
-        phase = torch.stack(
-            (
-                torch.cos(2.0 * math.pi * env._adjust_gait_phase),
-                torch.sin(2.0 * math.pi * env._adjust_gait_phase),
-            ),
-            dim=1,
-        )
-        internal = torch.zeros(env.num_envs, 7, device=env.device)
-        internal[:, 0] = 2.0
-        q_rel = robot.data.joint_pos - robot.data.default_joint_pos
-        obs = torch.cat(
-            (
-                command,
-                internal,
-                phase,
-                robot.data.projected_gravity_b,
-                robot.data.root_ang_vel_b,
-                q_rel,
-                robot.data.joint_vel,
-                env._adjust_teacher_last_action,
-            ),
-            dim=1,
-        )
-        with torch.inference_mode():
-            action = env._adjust_walk_teacher(obs)
-        walk_default = robot.data.default_joint_pos.clone()
-        env._adjust_teacher_target.copy_(walk_default + action)
-        env._adjust_teacher_last_action.copy_(action)
-        env._adjust_teacher_step.copy_(step)
-
-    student_target = action_term.processed_actions
-    error = torch.mean((student_target - env._adjust_teacher_target).square(), dim=1)
-    active = (~_ready_latch(env)).float()
-    return torch.exp(-error / (std * std)) * active
-
-
-def kick_teacher_tracking(env: ManagerBasedRLEnv, std: float = 0.20) -> torch.Tensor:
-    """Preserve the validated deploy kick after geometric alignment."""
-    action_term = env.action_manager.get_term("joint_pos")
-    if not hasattr(action_term, "kick_teacher_target"):
+    if not hasattr(action_term, "teacher_action"):
         return torch.zeros(env.num_envs, device=env.device)
     error = torch.mean(
-        (action_term.student_processed_actions - action_term.kick_teacher_target).square(),
-        dim=1,
+        (action_term.student_action - action_term.teacher_action).square(), dim=1
     )
-    return torch.exp(-error / (std * std)) * action_term.kick_teacher_active.float()
+    reward = torch.exp(-error / (std * std))
+    transition = getattr(
+        action_term,
+        "transition_active",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    return reward * torch.where(
+        transition,
+        torch.full_like(reward, transition_multiplier),
+        torch.ones_like(reward),
+    )
+
+
+def ball_distance_band_penalty(
+    env: ManagerBasedRLEnv,
+    minimum_distance: float = 0.20,
+    maximum_distance: float = 0.40,
+    scale: float = 0.10,
+    near_gate_distance: float = 0.60,
+) -> torch.Tensor:
+    """Enforce the 0.30 +/- 0.10 m band only near the ball.
+
+    Far-away starts are intentional in the all-direction approach curriculum,
+    so being 1 m away must not overwhelm the progress/approach objective. Once
+    the robot enters the near-ball gate, the upper and lower band edges become
+    active.
+    """
+    robot: Articulation = env.scene["robot"]
+    ball: RigidObject = env.scene["ball"]
+    distance = torch.norm(
+        robot.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2], dim=1
+    )
+    near_ball = distance <= near_gate_distance
+    violation = torch.relu(minimum_distance - distance) + torch.relu(
+        distance - maximum_distance
+    ) * near_ball.float()
+    action_term = env.action_manager.get_term("joint_pos")
+    kick_phase = getattr(action_term, "phase", torch.zeros_like(distance)) == 2
+    return (violation / scale).square() * (~kick_phase).float()

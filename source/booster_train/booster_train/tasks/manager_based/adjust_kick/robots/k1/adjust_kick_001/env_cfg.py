@@ -25,8 +25,8 @@ FEET = ["left_foot_link", "right_foot_link"]
 ADJUST_KICK_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
-WALK_TEACHER_PATH = os.path.abspath(
-    os.path.join(ADJUST_KICK_ROOT, "models", "walk_teacher.pt")
+ADJUST_TEACHER_PATH = os.path.abspath(
+    os.path.join(ADJUST_KICK_ROOT, "models", "adjust_teacher.pt")
 )
 
 KICK_TEACHER_PATH = os.path.abspath(
@@ -36,31 +36,23 @@ KICK_TEACHER_PATH = os.path.abspath(
 
 @configclass
 class ActionsCfg:
-    joint_pos = task_mdp.FrozenWalkAdjustActionCfg(
+    joint_pos = task_mdp.FrozenAdjustKickTransitionActionCfg(
         asset_name="robot",
         joint_names=[".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"],
         scale=1.0,
         use_default_offset=True,
-        teacher_path=WALK_TEACHER_PATH,
+        adjust_teacher_path=ADJUST_TEACHER_PATH,
         kick_teacher_path=KICK_TEACHER_PATH,
-        # Keep the validated kick direct for most of training; only late
-        # training lets the student absorb small environment-specific changes.
-        kick_teacher_blend_steps=(200_000, 400_000, 650_000),
-        kick_teacher_blend=(1.0, 0.90, 0.70, 0.0),
-        kick_teacher_post_kick_duration_s=0.0,
-        handoff_stage_steps=(100_000, 250_000, 500_000),
-        handoff_distance_ranges=(
-            (0.55, 0.65),
-            (0.50, 0.70),
-            (0.45, 0.75),
-            (0.45, 0.80),
-        ),
-        slowdown_distance=0.90,
-        handoff_heading_tolerance_deg=20.0,
-        transition_duration_s=0.25,
-        execute_walk_teacher=True,
-        walk_full_speed_heading_deg=15.0,
-        walk_stop_translation_heading_deg=45.0,
+        target_ball_distance=0.30,
+        minimum_ball_distance=0.20,
+        maximum_ball_distance=0.40,
+        ready_position_tolerance=0.08,
+        ready_heading_tolerance_deg=30.0,
+        ready_ball_speed_tolerance=0.08,
+        maximum_ball_displacement=0.04,
+        transition_duration_s=0.20,
+        rollin_stage_steps=(120_000, 300_000, 600_000),
+        teacher_control_blend=(1.0, 0.99, 0.90, 0.0),
     )
 
 
@@ -154,7 +146,9 @@ class RewardsCfg(KickRewardsCfg):
         weight=4.0,
         params={"position_std": 0.20, "heading_std_deg": 15.0},
     )
-    approach_time = RewTerm(func=mdp.approach_time, weight=-0.5)
+    # Every pre-kick control step costs reward so the shortest valid approach
+    # wins once the target is reachable from any side.
+    approach_time = RewTerm(func=mdp.approach_time, weight=-2.0)
 
     # During adjustment the ball must remain untouched.
     early_ball_motion = RewTerm(
@@ -171,21 +165,22 @@ class RewardsCfg(KickRewardsCfg):
         },
     )
 
-    # Preserve the validated walk when a 54-observation walk teacher is supplied.
-    walk_teacher_tracking = RewTerm(
-        func=mdp.walk_teacher_tracking,
-        weight=3.0,
-        params={"teacher_env_var": "ADJUST_KICK_WALK_TEACHER_JIT", "std": 0.20},
+    # The two supplied experts are frozen.  This single loss preserves both
+    # normalized action outputs across adjust, handoff, and kick.
+    composite_teacher_tracking = RewTerm(
+        func=mdp.composite_teacher_tracking,
+        weight=12.0,
+        params={"std": 0.10, "transition_multiplier": 1.0},
     )
-
-    # Distill the exact deploy kick only after precise behind-ball alignment.
-    # Roll-in blending reaches zero, but this reward keeps the original shape.
-    kick_teacher_tracking = RewTerm(
-        func=mdp.kick_teacher_tracking,
-        weight=4.0,
-        # Permit modest deviations such as a deeper knee bend while retaining
-        # the validated kick shape.
-        params={"std": 0.25},
+    ball_distance_band = RewTerm(
+        func=mdp.ball_distance_band_penalty,
+        weight=-8.0,
+        params={
+            "minimum_distance": 0.20,
+            "maximum_distance": 0.40,
+            "scale": 0.10,
+            "near_gate_distance": 0.60,
+        },
     )
 
     # Strong post-kick landing and stand-still objective.
@@ -294,5 +289,6 @@ class K1AdjustKickPlayEnvCfg(K1AdjustKickEnvCfg):
             1_000_000_000,
         )
         self.events.reset_scenario.params["visualize_target"] = True
-        self.actions.joint_pos.handoff_stage_steps = (0, 0, 0)
-        self.actions.joint_pos.debug_ready_latch = True
+        # Play evaluates the exported single actor without teacher roll-in.
+        self.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
+        self.actions.joint_pos.debug_transition = True
