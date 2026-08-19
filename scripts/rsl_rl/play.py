@@ -43,6 +43,16 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--transition_residual_scale", "--transition-residual-scale",
+    dest="transition_residual_scale", type=float, default=None,
+    help="Diagnostic override for transition action residual scale (environment config).",
+)
+parser.add_argument(
+    "--transition_duration_s", "--transition-duration-s",
+    dest="transition_duration_s", type=float, default=None,
+    help="Diagnostic override for teacher-to-teacher transition duration in seconds.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -101,6 +111,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # These are environment-config overrides, not Hydra/RSL-RL overrides.  The
+    # task config is returned as a Python object by hydra_task_config, so apply
+    # them here after Hydra has finished parsing.  This is intentionally limited
+    # to the transition action term and is useful for teacher-only diagnostics.
+    action_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if args_cli.transition_residual_scale is not None:
+        if action_cfg is None or not hasattr(action_cfg, "transition_residual_scale"):
+            raise ValueError("The selected task does not expose transition_residual_scale")
+        if args_cli.transition_residual_scale < 0.0:
+            raise ValueError("--transition_residual_scale must be non-negative")
+        action_cfg.transition_residual_scale = args_cli.transition_residual_scale
+        print(f"[play] transition_residual_scale={args_cli.transition_residual_scale}")
+    if args_cli.transition_duration_s is not None:
+        if action_cfg is None or not hasattr(action_cfg, "transition_duration_s"):
+            raise ValueError("The selected task does not expose transition_duration_s")
+        if args_cli.transition_duration_s < 0.0:
+            raise ValueError("--transition_duration_s must be non-negative")
+        action_cfg.transition_duration_s = args_cli.transition_duration_s
+        print(f"[play] transition_duration_s={args_cli.transition_duration_s}")
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
