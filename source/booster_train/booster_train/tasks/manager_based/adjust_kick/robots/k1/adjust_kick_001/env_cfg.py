@@ -4,6 +4,7 @@ import os
 
 from isaaclab.managers import (
     EventTermCfg as EventTerm,
+    ObservationTermCfg as ObsTerm,
     RewardTermCfg as RewTerm,
     SceneEntityCfg,
     TerminationTermCfg as DoneTerm,
@@ -294,5 +295,55 @@ class K1AdjustKickPlayEnvCfg(K1AdjustKickEnvCfg):
         )
         self.events.reset_scenario.params["visualize_target"] = True
         # Play evaluates the exported single actor without teacher roll-in.
+        self.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
+        self.actions.joint_pos.debug_transition = True
+
+
+@configclass
+class UnifiedRewardsCfg(RewardsCfg):
+    """Rewards for a single actor learned from frozen teachers at train time."""
+
+    composite_teacher_tracking = RewTerm(
+        func=mdp.composite_teacher_tracking,
+        weight=10.0,
+        params={"std": 0.10, "transition_multiplier": 0.35},
+    )
+    unified_applied_action_rate = RewTerm(
+        func=mdp.transition_applied_action_rate_l2,
+        weight=-0.5,
+    )
+    unified_transition_stability = RewTerm(
+        func=mdp.transition_stability,
+        weight=8.0,
+        params={"tilt_scale": 0.08, "angular_velocity_scale": 1.0},
+    )
+
+
+@configclass
+class K1AdjustKickUnifiedEnvCfg(K1AdjustKickEnvCfg):
+    """Train one full 50-to-12 actor; teachers exist only inside the trainer."""
+
+    rewards: UnifiedRewardsCfg = UnifiedRewardsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos.control_mode = "student"
+        # Teacher roll-in is a training curriculum. It is forced to zero in
+        # the Play config, so the exported actor is evaluated by itself.
+        self.actions.joint_pos.rollin_stage_steps = (24_000, 72_000, 144_000)
+        self.actions.joint_pos.teacher_control_blend = (1.0, 0.98, 0.70, 0.0)
+        self.observations.policy.transition_progress = ObsTerm(
+            func=kick_mdp.transition_phase_progress,
+            clip=(-1.0, 2.0),
+        )
+
+
+@configclass
+class K1AdjustKickUnifiedPlayEnvCfg(K1AdjustKickUnifiedEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 16
+        self.events.reset_scenario.params["stage_steps"] = (0, 0, 0, 0)
+        self.events.reset_scenario.params["visualize_target"] = True
         self.actions.joint_pos.teacher_control_blend = (0.0, 0.0, 0.0, 0.0)
         self.actions.joint_pos.debug_transition = True

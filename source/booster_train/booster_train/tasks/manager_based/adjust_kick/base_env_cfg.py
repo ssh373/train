@@ -141,7 +141,11 @@ class ObservationsCfg:
         ball_confidence = ObsTerm(func=mdp.ball_confidence)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.1, noise=Unoise(n_min=-0.5, n_max=0.5))
-        actions = ObsTerm(func=mdp.last_action)
+        actions = ObsTerm(func=mdp.transition_applied_action)
+        # Enabled only by the unified-training environment. Keeping the slot
+        # declared here guarantees it is appended after the original 49-value
+        # expert contract.
+        transition_progress = None
 
         def __post_init__(self):
             self.enable_corruption = True

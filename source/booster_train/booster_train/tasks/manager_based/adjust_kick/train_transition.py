@@ -1,10 +1,11 @@
-"""DAgger-style distillation for the unified K1 adjust-to-kick actor.
+"""Experimental teacher-rollout distillation for a stateless unified actor.
 
 The simulator is always controlled by the frozen composite teacher during this
-stage.  The student sees the ordinary 49-D deployment observation and learns
-the adjust expert, the 0.20 s blend, and the kick expert as one 49-to-12 model.
-The resulting RSL-RL checkpoint can be PPO fine-tuned with the normal train.py
-entry point and exported by play.py.
+stage. This is behavior cloning on teacher trajectories, not true DAgger: the
+student does not collect its own closed-loop states. It therefore cannot claim
+exact walking, kick, or recovery preservation. Use the registered
+``Booster-K1-Adjust-Kick-Unified_001-v0`` task for the recommended learned
+single-actor policy.
 
 Launch this through ``scripts/rsl_rl/train_adjust_kick_transition.py`` so
 ``AppLauncher`` runs before importing the ``booster_train`` package.
@@ -64,8 +65,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg) -> None:
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     agent_cfg.device = args_cli.device if args_cli.device is not None else agent_cfg.device
 
-    # DAgger collection stays on the frozen composite trajectory.  PPO later
-    # removes roll-in and validates the independently executed student.
+    # Teacher-rollout behavior cloning stays on the frozen composite
+    # trajectory. PPO later removes roll-in, but that does not make this true
+    # DAgger because student-induced states were not collected here.
     env_cfg.actions.joint_pos.teacher_control_blend = (1.0, 1.0, 1.0, 1.0)
     # The action term reuses the cached camera state but recomputes the policy
     # group to evaluate both experts. Disable ObservationManager's independent

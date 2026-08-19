@@ -19,7 +19,8 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-from booster_train.assets.robots.booster import K1_ACTION_SCALE
+from booster_assets import BOOSTER_ASSETS_DIR
+from booster_train.assets.robots.booster import BOOSTER_K1_CFG, K1_ACTION_SCALE
 from booster_train.tasks.manager_based.adjust import mdp
 from booster_train.tasks.manager_based.kick.robots.k1.kick_001.env_cfg import (
     ActionsCfg as KickActionsCfg,
@@ -93,6 +94,36 @@ class ObservationsCfg:
 
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
+
+
+@configclass
+class AdjustSceneCfg(KickSceneCfg):
+    """Adjust-only robot override.
+
+    The kick task may use a different robot asset in another checkout.  Keep
+    that choice local to kick, while adjust explicitly uses the standard
+    locomotion asset and actuator set from ``BOOSTER_K1_CFG``.
+    """
+
+    robot = BOOSTER_K1_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=BOOSTER_K1_CFG.init_state.replace(
+            pos=(0.0, 0.0, 0.57),
+            joint_pos={
+                ".*_Hip_Pitch": -0.2,
+                ".*_Knee_Pitch": 0.4,
+                ".*_Ankle_Pitch": -0.20,
+            },
+            joint_vel={".*": 0.0},
+        ),
+        spawn=BOOSTER_K1_CFG.spawn.replace(
+            asset_path=f"{BOOSTER_ASSETS_DIR}/robots/K1/K1_locomotion.urdf"
+        ),
+        actuators={
+            "legs": BOOSTER_K1_CFG.actuators["legs"],
+            "feet": BOOSTER_K1_CFG.actuators["feet"],
+        },
+    )
 
 
 @configclass
@@ -380,7 +411,7 @@ class EventsCfg(KickEventsCfg):
 
 @configclass
 class K1AdjustEnvCfg(ManagerBasedRLEnvCfg):
-    scene: KickSceneCfg = KickSceneCfg(num_envs=4096, env_spacing=8.0)
+    scene: AdjustSceneCfg = AdjustSceneCfg(num_envs=4096, env_spacing=8.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: KickActionsCfg = KickActionsCfg()
     rewards: RewardsCfg = RewardsCfg()

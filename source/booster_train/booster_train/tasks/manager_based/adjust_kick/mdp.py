@@ -552,6 +552,43 @@ def composite_teacher_tracking(
     )
 
 
+def transition_applied_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalize command discontinuity during the learned transition."""
+    action_term = env.action_manager.get_term("joint_pos")
+    if not hasattr(action_term, "applied_action_rate"):
+        return torch.zeros(env.num_envs, device=env.device)
+    active = getattr(
+        action_term,
+        "transition_active",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    return torch.sum(action_term.applied_action_rate.square(), dim=1) * active.float()
+
+
+def transition_stability(
+    env: ManagerBasedRLEnv,
+    tilt_scale: float = 0.08,
+    angular_velocity_scale: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward an upright, low-angular-rate body during the learned transition."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    action_term = env.action_manager.get_term("joint_pos")
+    active = getattr(
+        action_term,
+        "transition_active",
+        torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+    )
+    tilt = torch.sum(robot.data.projected_gravity_b[:, :2].square(), dim=1)
+    angular_velocity = torch.sum(robot.data.root_ang_vel_b[:, :2].square(), dim=1)
+    quality = torch.exp(
+        -tilt / max(tilt_scale * tilt_scale, 1.0e-6)
+        -angular_velocity
+        / max(angular_velocity_scale * angular_velocity_scale, 1.0e-6)
+    )
+    return quality * active.float()
+
+
 def ball_distance_band_penalty(
     env: ManagerBasedRLEnv,
     minimum_distance: float = 0.20,

@@ -252,6 +252,46 @@ def ball_confidence(env: ManagerBasedEnv) -> torch.Tensor:
     return _camera_ball_observation(env)[3]
 
 
+def transition_phase_progress(env: ManagerBasedEnv) -> torch.Tensor:
+    """Return an explicit scalar state for the learned unified actor.
+
+    ``-1`` means adjust, ``0..1`` is smoothstep transition progress, and
+    ``2`` means frozen kick/recovery.  The original experts never receive this
+    extra value; it is appended only during unified actor training.
+    """
+    action_term = env.action_manager.get_term("joint_pos")
+    if not hasattr(action_term, "phase"):
+        return torch.full((env.num_envs, 1), -1.0, device=env.device)
+    phase = action_term.phase
+    # Observations are computed before ``process_actions`` advances the phase.
+    # Expose the progress that will actually multiply the action being chosen
+    # now, rather than the value used on the previous control step.
+    alpha = getattr(
+        action_term,
+        "transition_progress_for_next_action",
+        action_term.transition_alpha,
+    )
+    value = torch.where(
+        phase == 0,
+        torch.full_like(alpha, -1.0),
+        torch.where(phase == 2, torch.full_like(alpha, 2.0), alpha),
+    )
+    return value.unsqueeze(1)
+
+
+def transition_applied_action(env: ManagerBasedEnv) -> torch.Tensor:
+    """Previous normalized command actually sent to the joints.
+
+    During teacher roll-in the raw PPO action and the command applied by the
+    action term differ. The unified actor must see the latter, matching the
+    previous-action contract used by the source actors and by deployment.
+    """
+    action_term = env.action_manager.get_term("joint_pos")
+    if hasattr(action_term, "applied_action"):
+        return action_term.applied_action
+    return action_term.raw_actions
+
+
 def ball_pos_w(env: ManagerBasedEnv, ball_cfg: SceneEntityCfg = SceneEntityCfg("ball")) -> torch.Tensor:
     ball: RigidObject = env.scene[ball_cfg.name]
     return ball.data.root_pos_w - env.scene.env_origins

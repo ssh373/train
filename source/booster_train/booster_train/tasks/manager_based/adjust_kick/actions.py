@@ -34,6 +34,10 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
 
     def __init__(self, cfg: "FrozenAdjustKickTransitionActionCfg", env: "ManagerBasedEnv") -> None:
         super().__init__(cfg, env)
+        if cfg.control_mode != "student":
+            raise ValueError(
+                "FrozenAdjustKickTransitionActionCfg.control_mode must be 'student'."
+            )
         self._adjust_teacher = self._load_teacher(
             cfg.adjust_teacher_path, cfg.adjust_teacher_env_var, "adjust"
         )
@@ -50,6 +54,9 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._student_action = torch.zeros(shape, device=self.device)
         self._student_processed_actions = torch.zeros(shape, device=self.device)
         self._teacher_processed_actions = torch.zeros(shape, device=self.device)
+        self._applied_action = torch.zeros(shape, device=self.device)
+        self._applied_action_rate = torch.zeros(shape, device=self.device)
+        self._previous_applied_action = torch.zeros(shape, device=self.device)
         self._phase = torch.full(
             (self.num_envs,), self.ADJUST, dtype=torch.long, device=self.device
         )
@@ -119,8 +126,27 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         return self._transition_alpha
 
     @property
+    def transition_progress_for_next_action(self) -> torch.Tensor:
+        """Smoothstep progress that will be applied to the next PPO action."""
+        if self.cfg.transition_duration_s <= 0.0:
+            return torch.ones_like(self._transition_elapsed)
+        normalized = (
+            self._transition_elapsed / self.cfg.transition_duration_s
+        ).clamp(0.0, 1.0)
+        return normalized.square() * (3.0 - 2.0 * normalized)
+
+    @property
     def transition_active(self) -> torch.Tensor:
         return self._phase == self.TRANSITION
+
+    @property
+    def applied_action(self) -> torch.Tensor:
+        """Normalized action actually converted to joint targets."""
+        return self._applied_action
+
+    @property
+    def applied_action_rate(self) -> torch.Tensor:
+        return self._applied_action_rate
 
     @property
     def adjust_teacher_active(self) -> torch.Tensor:
@@ -144,13 +170,16 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         observation = self._env.observation_manager.compute_group(
             "policy", update_history=False
         )
-        if not isinstance(observation, torch.Tensor) or observation.shape[1] != 49:
+        if not isinstance(observation, torch.Tensor) or observation.shape[1] not in (49, 50):
             shape = getattr(observation, "shape", None)
             raise RuntimeError(
-                "Adjust-kick teachers require a concatenated 49-D policy observation; "
+                "Adjust-kick teachers require the original 49-D observation, "
+                "optionally followed by one transition-progress value; "
                 f"got {shape}."
             )
-        return observation
+        # The unified PPO actor receives the appended phase scalar, while both
+        # frozen teacher references retain their exact original 49-value input.
+        return observation[:, :49]
 
     def _teacher_actions(self) -> tuple[torch.Tensor, torch.Tensor]:
         observation = self._policy_observation()
@@ -167,7 +196,7 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         # Do not pre-run the kick expert during a potentially long alignment.
         # Its first transition action therefore starts with the same zero
         # previous-action state as the standalone kick episode. Likewise, stop
-        # advancing adjust memory after the bridge is complete.
+        # advancing adjust memory after the transition is complete.
         adjust_active = self._phase != self.KICK
         kick_active = self._phase != self.ADJUST
         self._adjust_last_action[adjust_active] = adjust_action[adjust_active]
@@ -203,12 +232,17 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
                 self._transition_alpha[transition] = normalized.square() * (
                     3.0 - 2.0 * normalized
                 )
-                self._transition_elapsed[transition] += self._env.step_dt
                 finished = transition & (
                     self._transition_elapsed >= self.cfg.transition_duration_s
                 )
                 self._phase[finished] = self.KICK
                 self._transition_alpha[finished] = 1.0
+                # Keep the final in-window action at smoothstep(0.9) for a
+                # 10-step/0.20-s transition, then enter the kick phase on
+                # the following control step. This matches the exported
+                # stateful composite exactly.
+                still_transition = self._phase == self.TRANSITION
+                self._transition_elapsed[still_transition] += self._env.step_dt
 
         self._env._adjust_transition_active = self._phase == self.TRANSITION
 
@@ -257,14 +291,12 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._teacher_processed_actions.copy_(self._offset + composite * self._scale)
 
         blend = self._teacher_control_blend()
-        if blend > 0.0:
-            self._processed_actions.copy_(
-                torch.lerp(
-                    self._student_processed_actions,
-                    self._teacher_processed_actions,
-                    blend,
-                )
-            )
+        command = torch.lerp(self._student_action, composite, blend)
+        self._processed_actions.copy_(self._offset + command * self._scale)
+
+        self._applied_action.copy_(command)
+        self._applied_action_rate.copy_(command - self._previous_applied_action)
+        self._previous_applied_action.copy_(command)
         self._print_debug()
 
     def reset(self, env_ids=None) -> None:
@@ -277,6 +309,9 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._student_action[env_ids] = 0.0
         self._student_processed_actions[env_ids] = 0.0
         self._teacher_processed_actions[env_ids] = 0.0
+        self._applied_action[env_ids] = 0.0
+        self._applied_action_rate[env_ids] = 0.0
+        self._previous_applied_action[env_ids] = 0.0
         self._phase[env_ids] = self.ADJUST
         self._transition_elapsed[env_ids] = 0.0
         self._transition_alpha[env_ids] = 0.0
@@ -299,9 +334,13 @@ class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
     ready_heading_tolerance_deg: float = 30.0
     ready_ball_speed_tolerance: float = 0.08
     maximum_ball_displacement: float = 0.04
-    # A short bridge preserves the validated adjust/kick contact timing while
-    # avoiding a discontinuous joint target at handoff.
+    # A short transition preserves the validated adjust/kick contact timing
+    # while avoiding a discontinuous joint target at handoff.
     transition_duration_s: float = 0.20
+
+    # The PPO actor always produces the complete 12-D action. Teacher control
+    # is only a temporary roll-in curriculum during training.
+    control_mode: str = "student"
 
     rollin_stage_steps: tuple[int, int, int] = (120_000, 300_000, 600_000)
     teacher_control_blend: tuple[float, float, float, float] = (1.0, 0.99, 0.90, 0.0)
