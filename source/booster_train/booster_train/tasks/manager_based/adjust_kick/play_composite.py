@@ -78,7 +78,7 @@ def main(env_cfg, agent_cfg) -> None:
     print(f"[composite-play] policy: {policy_path}")
     print(f"[composite-play] robot asset: {env_cfg.scene.robot.spawn.asset_path}")
     print(
-        "[unified-play] phases: 0=adjust, 1=0.2s transition, 2=kick/recovery "
+        "[unified-play] phases: 0=adjust, 1=0.06s transition, 2=kick/recovery "
         f"teacher_control={args_cli.teacher_control}"
     )
 

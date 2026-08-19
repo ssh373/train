@@ -55,7 +55,7 @@ class ActionsCfg:
         maximum_ball_displacement=0.04,
         ready_lateral_tolerance=0.18,
         minimum_ball_forward_distance=0.10,
-        transition_duration_s=0.20,
+        transition_duration_s=0.06,
         rollin_stage_steps=(120_000, 300_000, 600_000),
         teacher_control_blend=(1.0, 0.99, 0.90, 0.0),
     )
@@ -399,7 +399,8 @@ class K1AdjustKickTransitionEnvCfg(K1AdjustKickEnvCfg):
         self.actions.joint_pos.control_mode = "transition"
         # Start with a small correction envelope: the frozen teachers must
         # dominate until the transition actor has learned a safe residual.
-        self.actions.joint_pos.transition_residual_scale = 0.04
+        self.actions.joint_pos.transition_duration_s = 0.06
+        self.actions.joint_pos.transition_residual_scale = 0.03
         self.observations.policy.transition_progress = ObsTerm(
             func=kick_mdp.transition_phase_progress,
             clip=(-1.0, 2.0),

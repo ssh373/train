@@ -8,7 +8,7 @@ import torch
 
 
 class FrozenExpertsLearnedTransitionPolicy(torch.nn.Module):
-    """Keep both source motions exact and learn only their 0.2 s handoff."""
+    """Keep both source motions exact and learn only their short handoff."""
 
     ADJUST = 0
     TRANSITION = 1
@@ -25,9 +25,9 @@ class FrozenExpertsLearnedTransitionPolicy(torch.nn.Module):
         ready_heading_tolerance_deg: float = 25.0,
         minimum_ball_distance: float = 0.20,
         maximum_ball_distance: float = 0.40,
-        transition_duration_s: float = 0.20,
+        transition_duration_s: float = 0.06,
         minimum_ball_confidence: float = 0.05,
-        transition_residual_scale: float = 0.04,
+        transition_residual_scale: float = 0.03,
         ready_lateral_tolerance: float = 0.18,
         minimum_ball_forward_distance: float = 0.10,
     ) -> None:

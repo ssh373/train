@@ -29,7 +29,7 @@ class LearnedUnifiedAdjustKickPolicy(torch.nn.Module):
         ready_heading_tolerance_deg: float = 30.0,
         minimum_ball_distance: float = 0.20,
         maximum_ball_distance: float = 0.40,
-        transition_duration_s: float = 0.20,
+        transition_duration_s: float = 0.06,
         minimum_ball_confidence: float = 0.05,
     ) -> None:
         super().__init__()

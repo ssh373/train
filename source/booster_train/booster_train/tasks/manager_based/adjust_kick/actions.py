@@ -223,6 +223,10 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
                 max_ball_displacement=self.cfg.maximum_ball_displacement,
                 lateral_tolerance=self.cfg.ready_lateral_tolerance,
                 minimum_ball_forward_distance=self.cfg.minimum_ball_forward_distance,
+                min_foot_ball_distance=self.cfg.minimum_foot_ball_distance,
+                max_foot_ball_distance=self.cfg.maximum_foot_ball_distance,
+                foot_lateral_tolerance=self.cfg.ready_foot_lateral_tolerance,
+                minimum_foot_forward_distance=self.cfg.minimum_foot_forward_distance,
             )
             start_transition = adjust_mask & ready
             self._phase[start_transition] = self.TRANSITION
@@ -245,8 +249,8 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
                 )
                 self._phase[finished] = self.KICK
                 self._transition_alpha[finished] = 1.0
-                # Keep the final in-window action at smoothstep(0.9) for a
-                # 10-step/0.20-s transition, then enter the kick phase on
+                # Keep the final in-window action at smoothstep(0.67) for a
+                # 3-step/0.06-s transition, then enter the kick phase on
                 # the following control step. This matches the exported
                 # stateful composite exactly.
                 still_transition = self._phase == self.TRANSITION
@@ -361,16 +365,23 @@ class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
     maximum_ball_displacement: float = 0.04
     ready_lateral_tolerance: float = 0.18
     minimum_ball_forward_distance: float = 0.10
+    # Immediate kick handoff uses the selected foot, not only the robot root.
+    minimum_foot_ball_distance: float = 0.04
+    maximum_foot_ball_distance: float = 0.25
+    ready_foot_lateral_tolerance: float = 0.16
+    minimum_foot_forward_distance: float = 0.0
     # A short transition preserves the validated adjust/kick contact timing
     # while avoiding a discontinuous joint target at handoff.
-    transition_duration_s: float = 0.20
+    # Three 50 Hz control steps: visually immediate, but long enough for the
+    # learned residual to absorb the adjust-to-kick target jump.
+    transition_duration_s: float = 0.06
 
     # ``transition`` means PPO controls only a bounded residual in the handoff;
     # adjust and kick remain frozen teacher outputs.
     control_mode: str = "student"
     # Conservative while the residual actor is still randomly initialized;
     # the frozen teachers should remain the dominant command source.
-    transition_residual_scale: float = 0.04
+    transition_residual_scale: float = 0.03
 
     rollin_stage_steps: tuple[int, int, int] = (120_000, 300_000, 600_000)
     teacher_control_blend: tuple[float, float, float, float] = (1.0, 0.99, 0.90, 0.0)

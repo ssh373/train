@@ -21,7 +21,7 @@ parser.add_argument(
 )
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--policy_dt", type=float, default=0.02)
-parser.add_argument("--transition_duration", type=float, default=0.20)
+parser.add_argument("--transition_duration", type=float, default=0.06)
 args = parser.parse_args()
 
 

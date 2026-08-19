@@ -145,14 +145,19 @@ def _ready_latch(
     max_ball_displacement: float = 0.10,
     lateral_tolerance: float = 0.18,
     minimum_ball_forward_distance: float = 0.10,
+    min_foot_ball_distance: float = 0.04,
+    max_foot_ball_distance: float = 0.25,
+    foot_lateral_tolerance: float = 0.16,
+    minimum_foot_forward_distance: float = 0.0,
 ) -> torch.Tensor:
     """Latch entry into the kickable sector, rather than one exact pose.
 
     ``position_tolerance`` is retained for compatibility with older configs,
     but the handoff gate is now defined by the kick teacher's usable region:
     radial robot-ball distance, target-relative lateral offset, ball-in-front
-    geometry, and the target-heading tolerance.  Once latched, the state
-    machine never falls back to adjust during the same episode.
+    geometry, target-heading tolerance, and the selected kicking foot's
+    distance/position relative to the ball. Once latched, the state machine
+    never falls back to adjust during the same episode.
     """
     if not hasattr(env, "_adjust_ready_latched"):
         env._adjust_ready_latched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -187,6 +192,49 @@ def _ready_latch(
         & (ball_b[:, 0] >= minimum_ball_forward_distance)
         & (ball_displacement <= max_ball_displacement)
     )
+
+    # The body-level gate above is not sufficient for an immediate kick: the
+    # selected foot can still be outside the kick teacher's contact workspace.
+    # Use the target-side preferred foot captured during reset (or the nearer
+    # foot for the center deadband) and require the ball to be in front of it.
+    # This is deliberately a geometry gate, not a contact-force gate, so the
+    # kick teacher can still perform its learned swing on the next control step.
+    if not hasattr(env, "_adjust_kick_foot_ids"):
+        foot_ids, _ = robot.find_bodies(["left_foot_link", "right_foot_link"], preserve_order=True)
+        if len(foot_ids) != 2:
+            raise RuntimeError(
+                "Adjust-kick requires left_foot_link and right_foot_link for the handoff gate"
+            )
+        env._adjust_kick_foot_ids = torch.as_tensor(
+            foot_ids, dtype=torch.long, device=robot.device
+        )
+    foot_ids = env._adjust_kick_foot_ids
+    foot_pos_w = robot.data.body_pos_w[:, foot_ids, :]
+    ball_pos_w = ball.data.root_pos_w[:, None, :]
+    foot_distances = torch.norm(foot_pos_w - ball_pos_w, dim=2)
+    preferred_foot = getattr(
+        env,
+        "_kick_preferred_foot",
+        torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device),
+    )
+    nearest_foot = torch.argmin(foot_distances, dim=1)
+    valid_preferred = (preferred_foot >= 0) & (preferred_foot < 2)
+    selected_foot = torch.where(valid_preferred, preferred_foot, nearest_foot)
+    env_ids = torch.arange(env.num_envs, device=robot.device)
+    selected_distance = foot_distances[env_ids, selected_foot]
+    selected_delta_w = ball.data.root_pos_w[:, :2] - foot_pos_w[env_ids, selected_foot, :2]
+    root_yaw = robot.data.heading_w
+    cos_yaw = torch.cos(root_yaw)
+    sin_yaw = torch.sin(root_yaw)
+    selected_delta_b_x = cos_yaw * selected_delta_w[:, 0] + sin_yaw * selected_delta_w[:, 1]
+    selected_delta_b_y = -sin_yaw * selected_delta_w[:, 0] + cos_yaw * selected_delta_w[:, 1]
+    foot_ready = (
+        (selected_distance >= min_foot_ball_distance)
+        & (selected_distance <= max_foot_ball_distance)
+        & (selected_delta_b_x >= minimum_foot_forward_distance)
+        & (selected_delta_b_y.abs() <= foot_lateral_tolerance)
+    )
+    ready_now &= foot_ready
     transition_active = getattr(
         env,
         "_adjust_transition_active",
