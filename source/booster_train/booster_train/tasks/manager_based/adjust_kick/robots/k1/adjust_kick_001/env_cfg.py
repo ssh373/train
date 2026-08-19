@@ -249,7 +249,10 @@ class EventsCfg(KickEventsCfg):
         func=mdp.reset_adjust_kick_scenario,
         mode="reset",
         params={
-            "stage_steps": (100_000, 250_000, 500_000),
+            # The transition trainer counts iterations as common steps. This
+            # mirrors adjust's five bands and reaches full 360 degrees in a
+            # 20k-iteration run.
+            "stage_steps": (4_000, 8_000, 12_000, 16_000),
             "visualize_target": False,
             "target_radius": 0.15,
         },
@@ -281,12 +284,13 @@ class K1AdjustKickPlayEnvCfg(K1AdjustKickEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 16
-        # Diagnose early checkpoints on the same Stage-0 distribution used by
-        # training; switch back to (0, 0, 0) for final Stage-3 evaluation.
+        # Play samples the final full-target-direction stage so the policy is
+        # tested over the same 360-degree target task as adjust.
         self.events.reset_scenario.params["stage_steps"] = (
-            1_000_000_000,
-            1_000_000_000,
-            1_000_000_000,
+            0,
+            0,
+            0,
+            0,
         )
         self.events.reset_scenario.params["visualize_target"] = True
         # Play evaluates the exported single actor without teacher roll-in.

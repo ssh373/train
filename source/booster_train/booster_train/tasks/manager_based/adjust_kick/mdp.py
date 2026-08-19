@@ -15,52 +15,56 @@ from booster_train.tasks.manager_based.adjust_kick import standalone_mdp as kick
 
 def _curriculum_stage(
     env: ManagerBasedEnv,
-    stage_steps: tuple[int, int, int],
+    stage_steps: tuple[int, ...],
 ) -> int:
     step = int(getattr(env, "common_step_counter", 0))
-    if step < stage_steps[0]:
-        return 0
-    if step < stage_steps[1]:
-        return 1
-    if step < stage_steps[2]:
-        return 2
-    return 3
+    # One threshold separates each adjacent target-angle band.  This mirrors
+    # the five-stage adjust curriculum without hard-coding its length here.
+    return sum(step >= threshold for threshold in stage_steps)
 
 
 def reset_adjust_kick_scenario(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
-    stage_steps: tuple[int, int, int] = (100_000, 250_000, 500_000),
+    stage_steps: tuple[int, ...] = (4_000, 8_000, 12_000, 16_000),
     visualize_target: bool = False,
     target_radius: float = 0.15,
 ):
-    """Reset ball and target using a four-stage 360-degree curriculum."""
+    """Reset source-compatible near-front ball and kick-target scenarios.
+
+    The supplied adjust/kick teachers were trained with the ball in the
+    robot's forward workspace. Keep that geometry, but preserve the adjust
+    teacher's full target-direction curriculum: the target may be anywhere
+    around the ball (0--180 degree magnitude, random left/right sign). The
+    +/-30 degree value is only the final kick-ready handoff gate.
+    """
     stage = _curriculum_stage(env, stage_steps)
     distributions = (
-        # The ball always starts inside the kickable distance band. Difficulty
-        # comes from progressively wider initial bearings, i.e. fast orbit and
-        # heading alignment around the nearby ball. Long-range walking is not
-        # silently assumed here because the supplied adjust teacher was not
-        # trained as a 1.2 m approach controller.
-        ((0.22, 0.38), (-15.0, 15.0), (3.5, 4.5), (-30.0, 30.0)),
-        ((0.22, 0.38), (-60.0, 60.0), (3.5, 5.5), (-30.0, 30.0)),
-        ((0.22, 0.38), (-120.0, 120.0), (3.5, 6.0), (-30.0, 30.0)),
-        ((0.22, 0.38), (-180.0, 180.0), (3.0, 7.0), (-30.0, 30.0)),
+        # Same progression as adjust: increasingly large target turns, then
+        # the complete 360-degree target space.  The ball remains in the
+        # source teacher's near-front workspace (.20--.35 m, +/- .15 m).
+        ((0.20, 0.35), (-0.15, 0.15), (4.0, 4.0), (30.0, 60.0)),
+        ((0.20, 0.35), (-0.15, 0.15), (4.0, 4.0), (45.0, 90.0)),
+        ((0.20, 0.35), (-0.15, 0.15), (4.0, 4.0), (90.0, 135.0)),
+        ((0.20, 0.35), (-0.15, 0.15), (4.0, 4.0), (135.0, 180.0)),
+        ((0.20, 0.35), (-0.15, 0.15), (4.0, 4.0), (0.0, 180.0)),
     )
-    ball_distance, ball_bearing, target_distance, target_angle = distributions[stage]
+    stage = min(stage, len(distributions) - 1)
+    ball_distance, ball_lateral, target_distance, target_angle = distributions[stage]
     kick_mdp.reset_ball_in_front(
         env,
         env_ids,
         x_range=ball_distance,
-        y_range=(-1.0, 1.0),
-        angle_range_deg=ball_bearing,
+        y_range=ball_lateral,
+        angle_range_deg=None,
         height=0.105,
     )
     kick_mdp.reset_kick_target(
         env,
         env_ids,
         distance_range=target_distance,
-        angle_range_deg=target_angle,
+        angle_range_deg=(-30.0, 30.0),
+        angle_magnitude_range_deg=target_angle,
         visualize_target=visualize_target,
         target_radius=target_radius,
         origin_at_ball=True,

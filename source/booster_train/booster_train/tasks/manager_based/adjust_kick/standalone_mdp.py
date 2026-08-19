@@ -351,6 +351,7 @@ def reset_kick_target(
     env_ids: torch.Tensor,
     distance_range: tuple[float, float] = (4.0, 4.0),
     angle_range_deg: tuple[float, float] = (-60.0, 60.0),
+    angle_magnitude_range_deg: tuple[float, float] | None = None,
     visualize_target: bool = False,
     target_radius: float = 0.15,
     origin_at_ball: bool = False,
@@ -367,7 +368,23 @@ def reset_kick_target(
         env._kick_target_w = torch.zeros(env.num_envs, 2, device=env.device)
 
     distance = torch.empty(count, device=env.device).uniform_(*distance_range)
-    relative_angle = torch.empty(count, device=env.device).uniform_(*angle_range_deg) * torch.pi / 180.0
+    if angle_magnitude_range_deg is None:
+        relative_angle = (
+            torch.empty(count, device=env.device).uniform_(*angle_range_deg)
+            * torch.pi
+            / 180.0
+        )
+    else:
+        # Match the adjust teacher's curriculum: sample an angle magnitude,
+        # then choose either side with equal probability.  The final range
+        # (0, 180) therefore covers the complete 360-degree target space.
+        magnitude = torch.empty(count, device=env.device).uniform_(*angle_magnitude_range_deg)
+        sign = torch.where(
+            torch.rand(count, device=env.device) < 0.5,
+            torch.full((count,), -1.0, device=env.device),
+            torch.ones(count, device=env.device),
+        )
+        relative_angle = sign * magnitude * torch.pi / 180.0
     q = yaw_quat(robot.data.root_quat_w[env_ids])
     robot_yaw = torch.atan2(2.0 * q[:, 0] * q[:, 3], 1.0 - 2.0 * q[:, 3].square())
     world_angle = robot_yaw + relative_angle

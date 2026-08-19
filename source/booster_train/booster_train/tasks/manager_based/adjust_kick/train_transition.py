@@ -5,6 +5,9 @@ stage.  The student sees the ordinary 49-D deployment observation and learns
 the adjust expert, the 0.20 s blend, and the kick expert as one 49-to-12 model.
 The resulting RSL-RL checkpoint can be PPO fine-tuned with the normal train.py
 entry point and exported by play.py.
+
+Launch this through ``scripts/rsl_rl/train_adjust_kick_transition.py`` so
+``AppLauncher`` runs before importing the ``booster_train`` package.
 """
 
 from __future__ import annotations

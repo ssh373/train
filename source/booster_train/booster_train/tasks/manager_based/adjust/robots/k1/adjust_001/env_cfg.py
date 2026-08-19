@@ -48,8 +48,8 @@ class ObservationsCfg:
                 "distance_noise_ratio": 0.02,
                 "dropout_rate_per_s": 0.50,
                 "dropout_duration_range": (0.08, 0.30),
-                "camera_bias_range": (-0.015, 0.015),
-                "camera_latency_s": 0.06,
+                "camera_bias_range": (-0.005, 0.005),
+                "camera_latency_s": 0.02,
             },
             clip=(-3.0, 3.0),
         )
@@ -340,16 +340,16 @@ class EventsCfg(KickEventsCfg):
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(2.0, 4.0),
+        interval_range_s=(4.0, 6.0),
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "velocity_range": {
-                "x": (-0.12, 0.12),
-                "y": (-0.12, 0.12),
+                "x": (-0.06, 0.06),
+                "y": (-0.06, 0.06),
                 "z": (0.0, 0.0),
-                "roll": (-0.06, 0.06),
-                "pitch": (-0.06, 0.06),
-                "yaw": (-0.10, 0.10),
+                "roll": (-0.03, 0.03),
+                "pitch": (-0.03, 0.03),
+                "yaw": (-0.05, 0.05),
             },
         },
     )

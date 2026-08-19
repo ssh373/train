@@ -44,11 +44,15 @@ The nominal robot-to-ball distance is `0.30 m`. Before kick, distances outside
 behind-ball pose within `0.08 m`, heading within `30 deg`, a nearly stationary
 ball, and no more than `0.04 m` ball displacement.
 
-The kick target bearing stays inside the validated `-30--30 deg` envelope. The
-ball remains in the kickable `0.22--0.38 m` band, while its initial bearing
-expands from `+/-15 deg` to the full `+/-180 deg`. This teaches fast orbit and
-heading alignment around a nearby ball. A separate long-range walk teacher is
-required if the ball should instead start 0.5--1.2 m away.
+The reset matches the supplied teacher geometry: the ball is in front of the
+robot at `0.20--0.35 m` with lateral offset `+/-0.15 m`. The requested target
+direction follows the adjust curriculum from `30--60`, `45--90`, `90--135`,
+`135--180`, and finally `0--180` degrees of magnitude with a random left/right
+sign, i.e. the full 360-degree task. The `+/-30 deg` value is only the final
+behind-ball heading gate that hands control to the kick teacher. Behind-
+the-robot or `0.5--1.2 m` starts are intentionally excluded because the
+supplied adjust teacher was not trained as a camera-search/long-range
+approach controller.
 
 ## Included teacher files
 
@@ -77,7 +81,7 @@ behavior is then added without beginning from a random network.
 
 ```bash
 cd train
-python -m booster_train.tasks.manager_based.adjust_kick.train_transition \
+python scripts/rsl_rl/train_adjust_kick_transition.py \
   --task Booster-K1-Adjust-Kick_001-v0 \
   --num_envs 4096 \
   --iterations 20000 \
@@ -115,9 +119,13 @@ Evaluate/export with no teacher control:
 python scripts/rsl_rl/play.py \
   --task Booster-K1-Adjust-Kick_001-Play-v0 \
   --checkpoint /absolute/path/to/model.pt \
-  --num_envs 1 --headless
+  --num_envs 16
 ```
 
 The Play task forces teacher roll-in to zero, so a successful result is the
 single student policy rather than hidden switching between the two source
-files.
+files. The adjust-kick Play environment uses the same source-compatible
+near-front ball reset as the teachers (`0.20--0.35 m`, lateral offset
+`+/-0.15 m`) and samples the final full-360-degree target stage. The kick
+handoff still occurs only after the robot is within the `+/-30 deg` heading
+gate.

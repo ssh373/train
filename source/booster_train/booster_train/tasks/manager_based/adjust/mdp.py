@@ -50,8 +50,8 @@ def ball_position_camera_b(
     distance_noise_ratio: float = 0.02,
     dropout_rate_per_s: float = 0.50,
     dropout_duration_range: tuple[float, float] = (0.08, 0.30),
-    camera_bias_range: tuple[float, float] = (-0.015, 0.015),
-    camera_latency_s: float = 0.06,
+    camera_bias_range: tuple[float, float] = (-0.005, 0.005),
+    camera_latency_s: float = 0.02,
 ) -> torch.Tensor:
     """Return a noisy, biased and delayed camera-like ball observation.
 
@@ -81,8 +81,8 @@ def _adjust_camera_observation(
     distance_noise_ratio: float = 0.02,
     dropout_rate_per_s: float = 0.50,
     dropout_duration_range: tuple[float, float] = (0.08, 0.30),
-    camera_bias_range: tuple[float, float] = (-0.015, 0.015),
-    camera_latency_s: float = 0.06,
+    camera_bias_range: tuple[float, float] = (-0.005, 0.005),
+    camera_latency_s: float = 0.02,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build one shared delayed camera frame for all camera observation terms."""
 

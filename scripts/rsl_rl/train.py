@@ -47,6 +47,18 @@ parser.add_argument(
     help="Override an environment reset curriculum stage when the task exposes reset_scenario.",
 )
 parser.add_argument(
+    "--learning_rate",
+    type=float,
+    default=None,
+    help="Override the PPO learning rate for fine-tuning.",
+)
+parser.add_argument(
+    "--desired_kl",
+    type=float,
+    default=None,
+    help="Override the adaptive PPO target KL for fine-tuning.",
+)
+parser.add_argument(
     "--reset_optimizer", action="store_true", default=False,
     help="Load checkpoint weights without optimizer state so the selected task's learning rate is used.",
 )
@@ -209,6 +221,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.learning_rate is not None:
+        agent_cfg.algorithm.learning_rate = args_cli.learning_rate
+    if args_cli.desired_kl is not None:
+        agent_cfg.algorithm.desired_kl = args_cli.desired_kl
     if args_cli.curriculum_stage is not None:
         events_cfg = getattr(env_cfg, "events", None)
         reset_scenario_cfg = getattr(events_cfg, "reset_scenario", None)
