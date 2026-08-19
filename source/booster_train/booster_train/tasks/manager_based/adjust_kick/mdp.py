@@ -36,7 +36,8 @@ def reset_adjust_kick_scenario(
     robot's forward workspace. Keep that geometry, but preserve the adjust
     teacher's full target-direction curriculum: the target may be anywhere
     around the ball (0--180 degree magnitude, random left/right sign). The
-    +/-30 degree value is only the final kick-ready handoff gate.
+    The full +/-30 degree value is the kick teacher's capability; the
+    transition gate uses the safer +/-25 degree interior of that range.
     """
     stage = _curriculum_stage(env, stage_steps)
     distributions = (
@@ -139,10 +140,20 @@ def _ready_latch(
     position_tolerance: float = 0.22,
     heading_tolerance_deg: float = 25.0,
     ball_speed_tolerance: float = 0.15,
-    min_robot_ball_distance: float = 0.10,
-    max_robot_ball_distance: float = 0.35,
+    min_robot_ball_distance: float = 0.20,
+    max_robot_ball_distance: float = 0.40,
     max_ball_displacement: float = 0.10,
+    lateral_tolerance: float = 0.18,
+    minimum_ball_forward_distance: float = 0.10,
 ) -> torch.Tensor:
+    """Latch entry into the kickable sector, rather than one exact pose.
+
+    ``position_tolerance`` is retained for compatibility with older configs,
+    but the handoff gate is now defined by the kick teacher's usable region:
+    radial robot-ball distance, target-relative lateral offset, ball-in-front
+    geometry, and the target-heading tolerance.  Once latched, the state
+    machine never falls back to adjust during the same episode.
+    """
     if not hasattr(env, "_adjust_ready_latched"):
         env._adjust_ready_latched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     _, distance, heading_error = _adjust_geometry(env, standoff=standoff)
@@ -154,12 +165,26 @@ def _ready_latch(
     )
     ball_start = getattr(env, "_kick_ball_start_xy", ball.data.root_pos_w[:, :2])
     ball_displacement = torch.norm(ball.data.root_pos_w[:, :2] - ball_start, dim=1)
+
+    # Position the robot in the target-facing half-plane.  ``direction_w``
+    # points from the ball toward the desired kick target, so a valid robot
+    # position has a negative projection along it (behind the ball).  The
+    # lateral bound permits the kick teacher's +/-25-degree approach sector
+    # without forcing the old exact 0.30 m center point.
+    target_w = kick_mdp._kick_target_w(env, (4.0, 0.0))
+    direction_w = target_w - ball.data.root_pos_w[:, :2]
+    direction_w = direction_w / torch.norm(direction_w, dim=1, keepdim=True).clamp_min(1.0e-6)
+    robot_delta = robot.data.root_pos_w[:, :2] - ball.data.root_pos_w[:, :2]
+    perpendicular_w = torch.stack((-direction_w[:, 1], direction_w[:, 0]), dim=1)
+    lateral_offset = torch.abs(torch.sum(robot_delta * perpendicular_w, dim=1))
+    ball_b = kick_mdp.ball_pos_b(env)
     ready_now = (
-        (distance <= position_tolerance)
-        & (heading_error.abs() <= math.radians(heading_tolerance_deg))
+        (heading_error.abs() <= math.radians(heading_tolerance_deg))
         & (ball_speed <= ball_speed_tolerance)
         & (robot_ball_distance >= min_robot_ball_distance)
         & (robot_ball_distance <= max_robot_ball_distance)
+        & (lateral_offset <= lateral_tolerance)
+        & (ball_b[:, 0] >= minimum_ball_forward_distance)
         & (ball_displacement <= max_ball_displacement)
     )
     transition_active = getattr(
@@ -569,6 +594,14 @@ def transition_applied_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
         torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
     )
     return torch.sum(action_term.applied_action_rate.square(), dim=1) * active.float()
+
+
+def transition_residual_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalize only the learned correction inside the handoff."""
+    action_term = env.action_manager.get_term("joint_pos")
+    if not hasattr(action_term, "transition_residual"):
+        return torch.zeros(env.num_envs, device=env.device)
+    return torch.sum(action_term.transition_residual.square(), dim=1)
 
 
 def transition_stability(

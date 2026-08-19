@@ -34,9 +34,10 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
 
     def __init__(self, cfg: "FrozenAdjustKickTransitionActionCfg", env: "ManagerBasedEnv") -> None:
         super().__init__(cfg, env)
-        if cfg.control_mode != "student":
+        if cfg.control_mode not in ("student", "transition"):
             raise ValueError(
-                "FrozenAdjustKickTransitionActionCfg.control_mode must be 'student'."
+                "FrozenAdjustKickTransitionActionCfg.control_mode must be "
+                "'student' or 'transition'."
             )
         self._adjust_teacher = self._load_teacher(
             cfg.adjust_teacher_path, cfg.adjust_teacher_env_var, "adjust"
@@ -54,6 +55,7 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._student_action = torch.zeros(shape, device=self.device)
         self._student_processed_actions = torch.zeros(shape, device=self.device)
         self._teacher_processed_actions = torch.zeros(shape, device=self.device)
+        self._transition_residual = torch.zeros(shape, device=self.device)
         self._applied_action = torch.zeros(shape, device=self.device)
         self._applied_action_rate = torch.zeros(shape, device=self.device)
         self._previous_applied_action = torch.zeros(shape, device=self.device)
@@ -149,6 +151,10 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         return self._applied_action_rate
 
     @property
+    def transition_residual(self) -> torch.Tensor:
+        return self._transition_residual
+
+    @property
     def adjust_teacher_active(self) -> torch.Tensor:
         return self._phase != self.KICK
 
@@ -215,6 +221,8 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
                 min_robot_ball_distance=self.cfg.minimum_ball_distance,
                 max_robot_ball_distance=self.cfg.maximum_ball_distance,
                 max_ball_displacement=self.cfg.maximum_ball_displacement,
+                lateral_tolerance=self.cfg.ready_lateral_tolerance,
+                minimum_ball_forward_distance=self.cfg.minimum_ball_forward_distance,
             )
             start_transition = adjust_mask & ready
             self._phase[start_transition] = self.TRANSITION
@@ -290,8 +298,22 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._teacher_action.copy_(composite)
         self._teacher_processed_actions.copy_(self._offset + composite * self._scale)
 
-        blend = self._teacher_control_blend()
-        command = torch.lerp(self._student_action, composite, blend)
+        if self.cfg.control_mode == "transition":
+            envelope = (
+                4.0 * self._transition_alpha * (1.0 - self._transition_alpha)
+            ).clamp(0.0, 1.0)
+            envelope *= (self._phase == self.TRANSITION).float()
+            residual = (
+                torch.tanh(self._student_action)
+                * self.cfg.transition_residual_scale
+                * envelope.unsqueeze(1)
+            )
+            self._transition_residual.copy_(residual)
+            command = composite + residual
+        else:
+            self._transition_residual.zero_()
+            blend = self._teacher_control_blend()
+            command = torch.lerp(self._student_action, composite, blend)
         self._processed_actions.copy_(self._offset + command * self._scale)
 
         self._applied_action.copy_(command)
@@ -309,6 +331,7 @@ class FrozenAdjustKickTransitionAction(JointPositionAction):
         self._student_action[env_ids] = 0.0
         self._student_processed_actions[env_ids] = 0.0
         self._teacher_processed_actions[env_ids] = 0.0
+        self._transition_residual[env_ids] = 0.0
         self._applied_action[env_ids] = 0.0
         self._applied_action_rate[env_ids] = 0.0
         self._previous_applied_action[env_ids] = 0.0
@@ -328,19 +351,24 @@ class FrozenAdjustKickTransitionActionCfg(JointPositionActionCfg):
     target_ball_distance: float = 0.30
     minimum_ball_distance: float = 0.20
     maximum_ball_distance: float = 0.40
+    # Legacy field retained for config compatibility; the gate now uses the
+    # kickable sector (distance/lateral/front geometry) instead of this point.
     ready_position_tolerance: float = 0.08
-    # Enter kick transition once the robot is within the requested +/-30 deg
-    # target-heading window.
-    ready_heading_tolerance_deg: float = 30.0
+    # Enter kick transition once the robot is inside the safer +/-25 deg
+    # portion of the kick teacher's +/-30 deg capability.
+    ready_heading_tolerance_deg: float = 25.0
     ready_ball_speed_tolerance: float = 0.08
     maximum_ball_displacement: float = 0.04
+    ready_lateral_tolerance: float = 0.18
+    minimum_ball_forward_distance: float = 0.10
     # A short transition preserves the validated adjust/kick contact timing
     # while avoiding a discontinuous joint target at handoff.
     transition_duration_s: float = 0.20
 
-    # The PPO actor always produces the complete 12-D action. Teacher control
-    # is only a temporary roll-in curriculum during training.
+    # ``transition`` means PPO controls only a bounded residual in the handoff;
+    # adjust and kick remain frozen teacher outputs.
     control_mode: str = "student"
+    transition_residual_scale: float = 0.12
 
     rollin_stage_steps: tuple[int, int, int] = (120_000, 300_000, 600_000)
     teacher_control_blend: tuple[float, float, float, float] = (1.0, 0.99, 0.90, 0.0)

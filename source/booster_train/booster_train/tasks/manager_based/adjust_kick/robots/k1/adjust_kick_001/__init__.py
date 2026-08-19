@@ -34,6 +34,26 @@ gym.register(
 )
 
 gym.register(
+    id="Booster-K1-Adjust-Kick-Transition_001-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_cfg:K1AdjustKickTransitionEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.ppo_cfg:TransitionPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Booster-K1-Adjust-Kick-Transition_001-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.env_cfg:K1AdjustKickTransitionPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.ppo_cfg:TransitionPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Booster-K1-Adjust-Kick_001-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

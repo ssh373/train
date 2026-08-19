@@ -516,11 +516,12 @@ def visualize_kick_ready_point(
     standoff: float = 0.30,
     radius: float = 0.10,
 ) -> None:
-    """Draw the blue robot arrival point behind the ball.
+    """Draw the blue center reference for the kickable sector.
 
     The red marker is the ball's final launch target. This separate blue
-    marker is the point the robot should reach before entering kick phase:
-    ``ball - 0.30 m * target_direction``.
+    marker is the center reference ``ball - 0.30 m * target_direction``.
+    It is visualization only: transition readiness is now a distance/front/
+    lateral/heading sector around this reference, not exact point arrival.
     """
     if not hasattr(env, "_kick_ready_visualizer"):
         env._kick_ready_visualizer = VisualizationMarkers(

@@ -1,64 +1,62 @@
-# K1 unified adjust -> kick policy
+# K1 adjust -> learned transition -> kick policy
 
-## Single learned unified policy (recommended)
+## Teacher-preserving learned transition (recommended)
 
-The final deployment artifact is one stateful TorchScript file containing one
-learned 50-to-12 actor. The two supplied actors are used only as frozen
-training references; they are not packaged into the final file. The actor is
-trained with an adjust-to-kick phase input and receives stability, contact,
-direction, recovery, and teacher-preservation rewards. The exported wrapper
-accepts the original 49 deployment values and maintains the phase internally.
+The final deployment artifact is one stateful TorchScript file containing the
+unchanged adjust teacher, unchanged kick teacher, and one learned 50-to-12
+transition actor. The transition actor produces only a bounded residual during
+the 0.20 s handoff. Adjust and kick are never replaced by a student network.
 
 This state is necessary because adjust-before-kick is a sequence with
 hysteresis. A stateless 49-to-12 MLP can encounter nearly identical physical
 observations before and after handoff while requiring different actions, which
 causes supervised distillation to average incompatible leg targets.
 
-Train the integrated actor with the normal RSL-RL trainer:
+Train only the transition actor with the normal RSL-RL trainer:
 
 ```bash
 cd /home/user/train
 python scripts/rsl_rl/train.py \
-  --task Booster-K1-Adjust-Kick-Unified_001-v0 \
+  --task Booster-K1-Adjust-Kick-Transition_001-v0 \
   --num_envs 4096 \
   --max_iterations 12000 \
   --headless \
   --device cuda:0
 ```
 
-During roll-in, the environment gradually reduces teacher control. The actor
-then produces the complete 12-D joint action during adjust, transition, kick,
-and recovery. Teacher tracking preserves the source motions while transition
-stability and actual command-rate rewards let the actor learn the missing
-boundary behavior.
+During training, the frozen adjust/kick teachers control the robot outside the
+handoff. The PPO actor is active only in the transition and learns a bounded
+residual using stability and actual command-rate rewards.
 
-Load a checkpoint to visually evaluate the single actor and export its 50-to-12
-actor JIT:
+Load a checkpoint to visually evaluate the transition actor and export its
+50-to-12 JIT:
 
 ```bash
 python scripts/rsl_rl/play.py \
-  --task Booster-K1-Adjust-Kick-Unified_001-Play-v0 \
-  --checkpoint /home/user/train/logs/rsl_rl/k1_adjust_kick_unified_001/RUN/model_12000.pt \
+  --task Booster-K1-Adjust-Kick-Transition_001-Play-v0 \
+  --checkpoint /home/user/train/logs/rsl_rl/k1_adjust_kick_transition_001/RUN/model_10000.pt \
   --num_envs 16
 ```
 
-The exported actor is written next to that checkpoint under `exported/`. Wrap
-that actor as the final one-file 49-to-12 stateful policy:
+The exported transition actor is written next to that checkpoint under
+`exported/`. Package it with the two frozen teachers as the final one-file
+49-to-12 stateful policy:
 
 ```bash
-python source/booster_train/booster_train/tasks/manager_based/adjust_kick/export_unified.py \
-  --actor /home/user/train/logs/rsl_rl/k1_adjust_kick_unified_001/RUN/exported/k1_adjust_kick_unified_001_RUN.pt \
-  --output logs/rsl_rl/k1_adjust_kick_unified_001/unified/k1_adjust_kick_unified.pt \
+python source/booster_train/booster_train/tasks/manager_based/adjust_kick/export_transition.py \
+  --adjust source/booster_train/booster_train/tasks/manager_based/adjust_kick/models/adjust_teacher.pt \
+  --kick source/booster_train/booster_train/tasks/manager_based/adjust_kick/models/kick_teacher.pt \
+  --transition /home/user/train/logs/rsl_rl/k1_adjust_kick_transition_001/RUN/exported/k1_adjust_kick_transition_001_RUN.pt \
+  --output logs/rsl_rl/k1_adjust_kick_transition_001/final/k1_adjust_kick_transition.pt \
   --device cpu
 ```
 
-The result contains no adjust/kick teacher modules. Test the learned one-file
-result in Isaac Sim with the task-local player:
+Test the final one-file result in the ordinary Play environment:
 
 ```bash
 python source/booster_train/booster_train/tasks/manager_based/adjust_kick/play_unified.py \
-  --task Booster-K1-Adjust-Kick-Unified_001-Play-v0 \
-  --policy logs/rsl_rl/k1_adjust_kick_unified_001/unified/k1_adjust_kick_unified.pt \
+  --task Booster-K1-Adjust-Kick_001-Play-v0 \
+  --policy logs/rsl_rl/k1_adjust_kick_transition_001/final/k1_adjust_kick_transition.pt \
   --num_envs 16
 ```
 

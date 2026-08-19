@@ -47,10 +47,14 @@ class ActionsCfg:
         target_ball_distance=0.30,
         minimum_ball_distance=0.20,
         maximum_ball_distance=0.40,
+        # Kept for compatibility; transition readiness is now a kickable
+        # sector, not an exact 0.30 m point.
         ready_position_tolerance=0.08,
-        ready_heading_tolerance_deg=30.0,
+        ready_heading_tolerance_deg=25.0,
         ready_ball_speed_tolerance=0.08,
         maximum_ball_displacement=0.04,
+        ready_lateral_tolerance=0.18,
+        minimum_ball_forward_distance=0.10,
         transition_duration_s=0.20,
         rollin_stage_steps=(120_000, 300_000, 600_000),
         teacher_control_blend=(1.0, 0.99, 0.90, 0.0),
@@ -363,4 +367,48 @@ class K1AdjustKickUnifiedPlayEnvCfg(K1AdjustKickUnifiedEnvCfg):
             teacher_blend,
             teacher_blend,
         )
+        self.actions.joint_pos.debug_transition = True
+
+
+@configclass
+class TransitionRewardsCfg(RewardsCfg):
+    """Rewards for learning only the teacher-to-teacher handoff residual."""
+
+    action_rate = None
+    composite_teacher_tracking = None
+    transition_residual = RewTerm(func=mdp.transition_residual_l2, weight=-2.0)
+    transition_action_rate = RewTerm(
+        func=mdp.transition_applied_action_rate_l2,
+        weight=-0.5,
+    )
+    transition_stability = RewTerm(
+        func=mdp.transition_stability,
+        weight=8.0,
+        params={"tilt_scale": 0.08, "angular_velocity_scale": 1.0},
+    )
+
+
+@configclass
+class K1AdjustKickTransitionEnvCfg(K1AdjustKickEnvCfg):
+    """Freeze adjust/kick and train a bounded residual only in transition."""
+
+    rewards: TransitionRewardsCfg = TransitionRewardsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos.control_mode = "transition"
+        self.actions.joint_pos.transition_residual_scale = 0.12
+        self.observations.policy.transition_progress = ObsTerm(
+            func=kick_mdp.transition_phase_progress,
+            clip=(-1.0, 2.0),
+        )
+
+
+@configclass
+class K1AdjustKickTransitionPlayEnvCfg(K1AdjustKickTransitionEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 16
+        self.events.reset_scenario.params["stage_steps"] = (0, 0, 0, 0)
+        self.events.reset_scenario.params["visualize_target"] = True
         self.actions.joint_pos.debug_transition = True
