@@ -17,47 +17,117 @@ def external_push(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
     asset_cfg: SceneEntityCfg,
-    push_interval_s: float,
-    push_duration_s: float,
-    force_randomization: dict,
-    torque_randomization: dict,
+    push_start_range_s: tuple[float, float],
+    push_duration_range_s: tuple[float, float],
+    force_magnitude_range: tuple[float, float],
+    torque_magnitude_range: tuple[float, float],
+    probability: float = 0.5,
 ):
-    """Apply walk-compatible randomized force/torque disturbances."""
+    """Apply a short randomized disturbance near the walk-to-kick handoff.
+
+    This callback is expected to run every control step.  Each episode samples
+    its own start time, duration, horizontal force and roll/pitch torque.  The
+    wrench is explicitly cleared outside the sampled window, avoiding the old
+    six-second callback that could not execute its one-second clear branch.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=asset.device)
+    else:
+        env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=asset.device)
     if asset_cfg.body_ids == slice(None):
         body_ids = torch.arange(asset.num_bodies, device=asset.device)
     else:
-        body_ids = torch.as_tensor(asset_cfg.body_ids, dtype=torch.long, device=asset.device)
-    if not hasattr(env, "pushing_forces"):
-        env.pushing_forces = torch.zeros(env.num_envs, asset.num_bodies, 3, device=asset.device)
-        env.pushing_torques = torch.zeros_like(env.pushing_forces)
+        body_ids = torch.as_tensor(
+            asset_cfg.body_ids, dtype=torch.long, device=asset.device
+        ).reshape(-1)
 
-    interval_steps = max(1, int(math.ceil(push_interval_s / env.step_dt)))
-    duration_steps = max(1, int(math.ceil(push_duration_s / env.step_dt)))
-    phase = int(env.common_step_counter) % interval_steps
-
-    def sample(params: dict, shape: tuple[int, ...]) -> torch.Tensor:
-        mean, std = params["range"]
-        return mean + std * torch.randn(shape, device=asset.device)
-
-    if phase == 0:
-        env.pushing_forces[env_ids[:, None], body_ids, :] = sample(
-            force_randomization, (len(env_ids), len(body_ids), 3)
+    if not hasattr(env, "_kick_transition_push_forces"):
+        wrench_shape = (env.num_envs, asset.num_bodies, 3)
+        env._kick_transition_push_forces = torch.zeros(wrench_shape, device=asset.device)
+        env._kick_transition_push_torques = torch.zeros_like(env._kick_transition_push_forces)
+        env._kick_transition_push_force_sample = torch.zeros(
+            env.num_envs, 3, device=asset.device
         )
-        env.pushing_torques[env_ids[:, None], body_ids, :] = sample(
-            torque_randomization, (len(env_ids), len(body_ids), 3)
+        env._kick_transition_push_torque_sample = torch.zeros(
+            env.num_envs, 3, device=asset.device
         )
-    elif phase == duration_steps:
-        env.pushing_forces[env_ids[:, None], body_ids, :].zero_()
-        env.pushing_torques[env_ids[:, None], body_ids, :].zero_()
+        env._kick_transition_push_start_s = torch.zeros(env.num_envs, device=asset.device)
+        env._kick_transition_push_end_s = torch.zeros(env.num_envs, device=asset.device)
+        env._kick_transition_push_enabled = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=asset.device
+        )
+        env._kick_transition_push_last_episode_step = torch.full(
+            (env.num_envs,), -1, dtype=env.episode_length_buf.dtype, device=asset.device
+        )
+
+    episode_step = env.episode_length_buf[env_ids]
+    previous_step = env._kick_transition_push_last_episode_step[env_ids]
+    reset = (previous_step < 0) | (episode_step < previous_step)
+    reset_ids = env_ids[reset]
+
+    if len(reset_ids) > 0:
+        count = len(reset_ids)
+        start = torch.empty(count, device=asset.device).uniform_(*push_start_range_s)
+        duration = torch.empty(count, device=asset.device).uniform_(*push_duration_range_s)
+        env._kick_transition_push_start_s[reset_ids] = start
+        env._kick_transition_push_end_s[reset_ids] = start + duration
+        env._kick_transition_push_enabled[reset_ids] = (
+            torch.rand(count, device=asset.device) < probability
+        )
+
+        force_angle = 2.0 * math.pi * torch.rand(count, device=asset.device)
+        force_magnitude = torch.empty(count, device=asset.device).uniform_(
+            *force_magnitude_range
+        )
+        env._kick_transition_push_force_sample[reset_ids, 0] = (
+            force_magnitude * torch.cos(force_angle)
+        )
+        env._kick_transition_push_force_sample[reset_ids, 1] = (
+            force_magnitude * torch.sin(force_angle)
+        )
+        env._kick_transition_push_force_sample[reset_ids, 2] = 0.0
+
+        torque_angle = 2.0 * math.pi * torch.rand(count, device=asset.device)
+        torque_magnitude = torch.empty(count, device=asset.device).uniform_(
+            *torque_magnitude_range
+        )
+        env._kick_transition_push_torque_sample[reset_ids, 0] = (
+            torque_magnitude * torch.cos(torque_angle)
+        )
+        env._kick_transition_push_torque_sample[reset_ids, 1] = (
+            torque_magnitude * torch.sin(torque_angle)
+        )
+        env._kick_transition_push_torque_sample[reset_ids, 2] = 0.0
+
+    elapsed_s = episode_step.float() * env.step_dt
+    active = (
+        env._kick_transition_push_enabled[env_ids]
+        & (elapsed_s >= env._kick_transition_push_start_s[env_ids])
+        & (elapsed_s < env._kick_transition_push_end_s[env_ids])
+    )
+
+    # Clear every selected environment first so the wrench lasts for exactly
+    # its sampled duration, including across asynchronous episode resets.
+    env._kick_transition_push_forces[env_ids[:, None], body_ids, :] = 0.0
+    env._kick_transition_push_torques[env_ids[:, None], body_ids, :] = 0.0
+    active_ids = env_ids[active]
+    if len(active_ids) > 0:
+        env._kick_transition_push_forces[active_ids[:, None], body_ids, :] = (
+            env._kick_transition_push_force_sample[active_ids, None, :]
+        )
+        env._kick_transition_push_torques[active_ids[:, None], body_ids, :] = (
+            env._kick_transition_push_torque_sample[active_ids, None, :]
+        )
+
+    env._kick_transition_push_last_episode_step[env_ids] = episode_step
 
     asset.set_external_force_and_torque(
-        env.pushing_forces[env_ids[:, None], body_ids, :],
-        env.pushing_torques[env_ids[:, None], body_ids, :],
+        env._kick_transition_push_forces[env_ids[:, None], body_ids, :],
+        env._kick_transition_push_torques[env_ids[:, None], body_ids, :],
         env_ids=env_ids,
         body_ids=body_ids,
+        is_global=True,
     )
 
 

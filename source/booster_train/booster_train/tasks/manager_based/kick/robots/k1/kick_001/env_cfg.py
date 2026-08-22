@@ -486,21 +486,18 @@ class EventsCfg:
     push_robot = EventTerm(
         func=mdp.external_push,
         mode="interval",
-        interval_range_s=(6.0, 6.0),
+        # Run the callback every control step so it can both start and clear
+        # the short handoff disturbance at the sampled per-episode times.
+        interval_range_s=(0.02, 0.02),
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
-            "push_interval_s": 6.0,
-            "push_duration_s": 1.0,
-            "force_randomization": {
-                "range": (0.0, 6.0),
-                "operation": "additive",
-                "distribution": "gaussian",
-            },
-            "torque_randomization": {
-                "range": (0.0, 0.6),
-                "operation": "additive",
-                "distribution": "gaussian",
-            },
+            # Standalone kick training treats episode start as the handoff.
+            # Keep half the samples nominal while resume training adapts.
+            "push_start_range_s": (0.0, 0.5),
+            "push_duration_range_s": (0.1, 0.2),
+            "force_magnitude_range": (2.0, 4.0),
+            "torque_magnitude_range": (0.1, 0.3),
+            "probability": 0.5,
         },
     )
 
